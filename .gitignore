@@ -1,0 +1,23 @@
+*.pyc
+*.log
+node_modules
+coverage/
+arches_merge/logs
+arches_merge/export_deliverables
+arches_merge/cantaloupe/*
+arches_merge/staticfiles
+arches_merge/media/packages
+arches_merge/media/build/
+arches_merge/uploadedfiles/*
+arches_merge/settings_local.py
+webpack-stats.json
+.vscode/
+*.egg-info
+.DS_STORE
+CACHE
+.tsconfig-paths.json
+.frontend-configuration-settings.json
+
+# Packaging
+build/
+dist/

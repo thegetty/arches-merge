@@ -1,0 +1,1614 @@
+{% load i18n %}
+
+{% block task_details %}
+<div class="etl-module-component-container" >
+    <div class="etl-module-body">
+        
+        <h2>
+            <span
+                style="font-weight: 400; font-size: 1.7rem; color: #565656"
+                data-bind="text: 'Merge Resources'"
+            ></span>
+        </h2>
+        <p
+            class="pad-btm"
+            style="margin-top: 10px"
+        >
+            {% blocktrans %}Merge two or more resources into one resource. Data in the Merge Resource(s) will be integrated into the Base Resource. Merge Resource(s) will be deleted upon merge.{% endblocktrans %}
+        </p>
+        <!-- base resource -->
+        <p
+            class="pad-btm"
+            style="margin-top: 10px"
+        >
+            {% blocktrans %}Add UUID for Base Resource that will contain merged data{% endblocktrans %}
+        </p>
+        <div>
+            <input
+                data-bind="value: resourceBase, valueUpdate: 'afterkeydown'"
+                placeholder="Base Resource UUID…"
+                style="border-radius: 4px;height:33px; width: 300px;"
+            />
+            <button
+                style="
+                    background-color: #8cc74f;
+                    color: #fff;
+                    border: none;
+                    font-weight: normal;
+                    border-radius: 4px;
+                    height:33px;
+                    width:200px;
+                "
+                type="submit"
+                data-bind="enable: resourceBase() && isValidUuid(resourceBase()), click: BaseResource"
+            >
+                Add Base Resource
+            </button>
+            <div data-bind=" visible: InfoBase">
+                <p
+                    class="pad-btm"
+                    style="margin-top: 10px"
+                >
+                    {% blocktrans %}UUID of Base Resource:{% endblocktrans %}
+                </p>
+                <li
+                    style="
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        background: #f5f5f5;
+                        margin-top: 8px;
+                        width: 50%;
+                        padding: 8px 12px;
+                        border-radius: 4px;
+                    "
+                >
+                    <span data-bind="text: resourceBaseDisplay"></span>
+                </li>
+            </div>
+        </div>
+        <!-- list merge -->
+        <div data-bind=" visible: InfoBase">
+            <p
+                class="pad-btm"
+                style="margin-top: 10px"
+            >
+                {% blocktrans %}Add UUID for Merge Resource that will merge with Base Resource. Merge Resource will be deleted upon merge.{% endblocktrans %}
+            </p>
+
+            <input
+                data-bind="value: itemToAdd, valueUpdate: 'afterkeydown'"
+                placeholder="Merge Resource UUID…"
+                style="border-radius: 4px; height:33px; width: 300px;"
+            />
+            <button
+                style="
+                    background-color: #8cc74f;
+                    color: #fff;
+                    border: none;
+                    border-radius: 4px;
+                    font-weight: normal;
+                    height:33px;
+                    width:200px;
+                "
+                type="submit"
+                data-bind="enable: itemToAdd() && isValidUuid(itemToAdd()), click: addResource"
+            >
+                Add Merge Resource
+            </button>
+
+            <div data-bind="visible: flagInfo">
+                <p
+                    class="pad-btm"
+                    style="margin-top: 10px"
+                >
+                    {% blocktrans %}Add UUID for Merge Resource that will merge with Base Resource. Merge Resource will be deleted upon merge.{% endblocktrans %}
+                </p>
+                <ul
+                    style="list-style-type: none; padding: 0"
+                    data-bind="foreach: mergeResources"
+                >
+                    <li
+                        style="
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            background: #f5f5f5;
+                            margin-top: 8px;
+                            width: 50%;
+                            padding: 8px 12px;
+                            border-radius: 4px;
+                        "
+                    >
+                        <span data-bind="text: $parent.getResourceDisplay($data)"></span>
+                        <button
+                            style="
+                                background-color: #dc3545;
+                                color: #fff;
+                                border: none;
+                                border-radius: 4px;
+                                padding: 4px 8px;
+                                cursor: pointer;
+                                font-size: 12px;
+                            "
+                            data-bind="click: $parent.deleteResource"
+                        >
+                            Remove
+                        </button>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        <div data-bind="visible: showSamePreview">
+            <p
+                class="pad-btm"
+                style="margin-top: 10px"
+            >
+                {% blocktrans %}This UUID has been used.{% endblocktrans %}
+            </p>
+        </div>
+
+
+
+        <!-- preview -->
+        <div
+            data-bind="visible: showPreview"
+            style="margin: 15px"
+        >
+            <button
+                data-bind="click: displayInformation, enable: !isLoadingPreview()"
+                class="btn btn-success"
+                style="border-radius: 4px; height:33px; width:160px; display:flex; align-items:center; justify-content:center; gap:6px;"
+            >
+                <!-- ko if: !isLoadingPreview() -->
+                Preview
+                <!-- /ko -->
+
+                <!-- ko if: isLoadingPreview() -->
+                <span class="custom-spinner"></span>
+                <span>Loading</span>
+                <!-- /ko -->
+            </button>
+
+        </div>
+        
+        <div data-bind="text: message, visible: flagMessage"></div>
+
+        <div data-bind="visible: showResults">
+            <p
+                class="pad-btm"
+                style="margin-top: 10px"
+            >
+                {% blocktrans %}The following node(s) and tile(s) may be merged from the Merge Resource(s) to the Base Resource. To preserve the model structure some tiles may not be merged{% endblocktrans %}
+            </p>
+            <div data-bind="if: mergeableNodeGroups().length === 0">
+                <p class="pad-btm" style="margin-top: 6px">
+                    {% blocktrans %}No mergeable node groups were found for the selected resources.{% endblocktrans %}
+                </p>
+            </div>
+            <div data-bind="if: mergeableNodeGroups().length !== 0" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                
+                <input
+                    data-bind="value: filterMergeableNodegroupsQuery, valueUpdate: 'afterkeydown'"
+                    id="filter-mergable-nodegroups"
+                    placeholder="Type to filter nodegroups based on text"
+                    type="text"
+                    style="border-radius: 4px; width: 300px; min-width: 10em; height:33px;"
+                >
+                <button
+                    style="
+                        background-color: #8cc74f;
+                        color: #fff;
+                        border: none;
+                        border-radius: 4px;
+                        font-weight: normal;
+                        height:33px;
+                        width:120px;
+                        display:flex;
+                        align-items:center;
+                        justify-content:center;
+                        gap:6px;
+                    "
+                    type="submit"
+                    data-bind="
+                        click: filterNodeGroups,
+                        enable: !isFiltering(),
+                      
+                    "
+                >
+                    <!-- ko if: !isFiltering() -->
+                    Filter
+                    <!-- /ko -->
+
+                    <!-- ko if: isFiltering -->
+                    <span class="custom-spinner"></span>
+                    <span>Filtering</span>
+                    
+                    <!-- /ko -->
+                </button>
+                <button
+                    style="
+                        background-color: #dc3545;
+                        color: #fff;
+                        border: none;
+                        border-radius: 4px;
+                        padding: 4px 8px;
+                        cursor: pointer;
+                        font-size: 12px;
+                        height:33px;
+                        width:120px;
+                        display:flex;
+                        align-items:center;
+                        justify-content:center;
+                        gap:6px;
+                    "
+                    type="submit"
+                    data-bind="
+                        click: resetFilters,
+                        enable: !isResetting(),
+                    "
+                >
+                    <!-- ko if: !isResetting() -->
+                        Reset Filters
+                    <!-- /ko -->
+
+                    <!-- ko if: isResetting -->
+                        <span class="custom-spinner"></span>
+                        <span>Resetting</span>
+                        
+                    <!-- /ko -->
+                
+                </button>
+            </div>
+
+           <div style="display: flex; justify-content: flex-end; margin-top: 10px;"
+                >
+
+                <div data-bind="attr: { title: exclusionsDirty() ? 'Please update the dict counts before downloading CSV' : '' }">
+                    <button class="btn btn-default"
+                            style="background-color: #8cc74f; color: #fff; border-radius: 4px; height:33px; width:120px;"
+                            data-bind="
+                                click: canDownloadCSV() ? downloadPreviewCSV : null,
+                                enable: canDownloadCSV()
+                            ">
+                        Download CSV
+                    </button>
+                </div>
+
+            </div>
+            <div class="merge-summary-wrap" data-bind="visible: InfoBase">
+                <table class="table table-bordered merge-summary-table">
+                    <thead>
+                        <tr>
+                            <th colspan="2" class="merge-summary-title">Merge Resource Data</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="merge-summary-label">Base Resource</td>
+                            <td>
+                                <a target="_blank"
+                                    rel="noopener"
+                                    data-bind="text: resourceBaseDisplay, attr: { href: '/report/' + (resourceBase ? resourceBase() : '') }">
+                                </a>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td class="merge-summary-label">Merge Resource(s)</td>
+                            <td>
+                                <div data-bind="if: mergeResources().length === 0">—</div>
+
+                                    <ul class="merge-summary-list" data-bind="foreach: mergeResources">
+                                        <li>
+                                            <a target="_blank"
+                                            rel="noopener"
+                                            data-bind="text: $parent.getResourceDisplay($data),
+                                                        attr: { href: '/report/' + $data }">
+                                            </a>
+                                        </li>
+                                    </ul>
+
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="merge-preview-table-wrap">
+                <table class="table table-bordered merge-preview-table dict-table">
+                    <thead>
+                        <tr>
+                            <th class="merge-preview-sortable" style="width: 28%;"
+                                data-bind="click: function() { togglePreviewSort('nodegroupName'); }, text: 'Nodegroup' + getPreviewSortIndicator('nodegroupName')"></th>
+                            <th class="merge-preview-sortable" style="width: 10%;"
+                                data-bind="click: function() { togglePreviewSort('status'); }, text: 'Status' + getPreviewSortIndicator('status')"></th>
+                            <th class="merge-preview-sortable" style="width: 8%;"
+                                data-bind="click: function() { togglePreviewSort('tileId'); }, text: 'Tile' + getPreviewSortIndicator('tileId')"></th>
+                            <th class="merge-preview-sortable" style="width: 14%;"
+                                data-bind="click: function() { togglePreviewSort('resourceId'); }, text: 'Resource' + getPreviewSortIndicator('resourceId')"></th>
+                            <th class="merge-preview-sortable" style="width: 30%;"
+                                data-bind="click: function() { togglePreviewSort('tiledata'); }, text: 'Tile data' + getPreviewSortIndicator('tiledata')"></th>
+                            <th class="merge-preview-sortable" style="width: 10%;"
+                                data-bind="click: function() { togglePreviewSort('tiledataStatus'); }, text: 'Tile data Status' + getPreviewSortIndicator('tiledataStatus')"></th>
+                            
+                            
+
+                        </tr>
+                    </thead>
+
+                    <tbody data-bind="foreach: pagedRows">
+                    <tr data-bind="css: { 'ng-alt': (groupIndex % 2) === 1 }">
+
+                        <!-- Nodegroup cell only on first row in the run -->
+                        <!-- ko if: showGroupCell -->
+                        <td data-bind="attr: { rowspan: rowspan }">
+                        <div style="display:flex; gap:10px; align-items:center; justify-content:space-between;">
+                            <div>
+                            <div data-bind="text: nodegroupName"></div>
+                            <div class="mono" style="font-size:12px; color:#777;"
+                                data-bind="text: nodegroupId"></div>
+                            </div>
+
+                            <!--<button
+                            class="btn btn-xs"
+                            style="border-radius:4px;"
+                            data-bind="
+                                click: function(){ $component.toggleExcludeNodegroup(nodegroupId); },
+                                css: $component.isNodegroupExcluded(nodegroupId) ? 'btn-danger' : 'btn-default',
+                                text: $component.isNodegroupExcluded(nodegroupId) ? 'Excluded' : 'Exclude'
+                                ">
+                            </button> -->
+                        </div>
+                        </td>
+                        <!-- /ko -->
+                         <!-- Status cell only once per tileKey (page-local) -->
+                        <!-- ko if: showStatusCell -->
+                        <td data-bind="attr: { rowspan: statusRowspan }">
+                            <span class="merge-preview-status"
+                                  data-bind="text: status === 'added' ? 'Add' :
+                                                   status === 'merged' ? 'Merge' :
+                                                   (status || 'Unknown'),
+                                  css: 'merge-preview-status--' + ((status || 'Unknown').toLowerCase())">
+                            </span>
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Tile cell only once per tileKey (page-local) -->
+                        <!-- ko if: showTileCell -->
+                        <td data-bind="attr: { rowspan: tileRowspan }">
+
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+
+                            <div class="mono" data-bind="let: { expanded: ko.observable(false) }">
+
+                                <!-- Tile ID -->
+                                <span class="tile-short"
+                                    data-bind="
+                                        text: expanded()
+                                            ? (tileId || '—')
+                                            : (tileId ? tileId.substring(0, 5) + (tileId.length > 5 ? '…' : '') : '—'),
+                                        click: function(){ if (tileId) expanded(!expanded()) },
+                                        attr: { title: tileId || '' },
+                                        css: { 'is-clickable': tileId }">
+                                </span>
+
+                                <!-- Parent Tile ID -->
+                                <!-- ko if: parenttileid -->
+                                <div style="font-size:11px; color:#777;">
+                                    parent:
+                                    <span data-bind="let: { expandedParent: ko.observable(false) }">
+                                        <span
+                                            data-bind="
+                                                text: expandedParent()
+                                                    ? parenttileid
+                                                    : parenttileid.substring(0, 5) + (parenttileid.length > 5 ? '…' : ''),
+                                                click: function(){ expandedParent(!expandedParent()) },
+                                                attr: { title: parenttileid }"
+                                            style="cursor:pointer;">
+                                        </span>
+                                    </span>
+                                </div>
+                                <!-- /ko -->
+
+                            </div>
+
+                            <!-- Exclude Button -->
+                            <!--<button
+                                class="btn btn-xs"
+                                style="border-radius:4px;"
+                                data-bind="
+                                    click: function(){ $component.toggleExcludeTile(tileId); },
+                                    css: $component.isTileExcluded(tileId) ? 'btn-danger' : 'btn-default',
+                                    text: $component.isTileExcluded(tileId) ? 'Excluded' : 'Exclude'
+                                ">
+                            </button> -->
+
+                        </div>
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Resource cell only once per tileKey (page-local) -->
+                        <!-- ko if: showResourceCell -->
+                        <td class="mono" data-bind="attr: { rowspan: resourceRowspan }">
+                        <!-- ko if: resourceId -->
+                        <a target="_blank" rel="noopener"
+                            data-bind="text: resourceId, attr: { href: '/report/' + resourceId }"></a>
+                        <!-- /ko -->
+                        <!-- ko ifnot: resourceId -->—<!-- /ko -->
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Tile data: ONE entry per row -->
+                        <td>
+                            <div class="tiledata-row" data-bind="let: { expanded: ko.observable(false) }">
+
+                                <!-- Label -->
+                                <div class="tiledata-label">
+                                    <span data-bind="text: tiledataLabel || '—'"></span>:
+                                </div>
+
+                                <!-- Value -->
+                                <div class="tiledata-value"
+                                    data-bind="
+                                        text: tiledataValue || '—',
+                                        click: function(){ expanded(!expanded()) },
+                                        css: { 'is-expanded': expanded() },
+                                        attr: { title: tiledataValue || '' }
+                                    ">
+                                </div>
+
+                                
+
+                            </div>
+                        </td>
+                        <td>
+                            <div style="min-width: 80px;">
+                                    <span class="merge-preview-status"
+                                        data-bind="
+                                            text: tiledataStatus === 'added' ? 'Unique - add' :
+                                                tiledataStatus === 'merged' ? 'Redundant - ignore' :
+                                                tiledataStatus,
+                                            css: 'merge-preview-status--' + ((tiledataStatus || '').toLowerCase())
+                                        ">
+                                    </span>
+                                </div>
+                        </td>
+
+                        
+
+                    </tr>
+                    </tbody>
+
+                </table>
+            </div>
+
+
+            <div data-bind="if: filteredMergeableNodeGroups().length">
+                <div style="display:flex; align-items:center; gap:10px; margin-top:12px;">
+                    <button class="btn btn-default"
+                            data-bind="click: prevPage, enable: currentPage() > 1">
+                    Prev
+                    </button>
+
+                    <span>
+                    Page <strong data-bind="text: currentPage"></strong>
+                    /
+                    <strong data-bind="text: totalPages"></strong>
+                    (<span data-bind="text: filteredRows().length"></span> rows,
+                    <span data-bind="text: filteredMergeableNodeGroups().length"></span> nodegroups)
+                    </span>
+
+                    <button class="btn btn-default"
+                            data-bind="click: nextPage, enable: currentPage() < totalPages()">
+                    Next
+                    </button>
+                </div>
+            </div>
+
+
+            <!-- Dict counts table -->
+            <div data-bind="if: dictCountsTable().length" style="margin-top: 18px;">
+                
+                <!-- Button wrapper -->
+                 <!--
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                    <button
+                        class="btn btn-warning"
+                        style="
+                            border-radius:4px;
+                            background-color:#8cc74f;
+                            color:#fff;
+                            border-color:#8cc74f;
+                            height: 33px;
+                            width: 170px;
+                        "
+                        data-bind="
+                            click: recalculateDictCounts,
+                            visible: showResults,
+                            enable: exclusionsDirty() && !isRecalculating(),
+                            text: recalcButtonLabel
+                        ">
+                    </button>
+                </div>
+                -->
+                <div class="merge-dict-table-wrap">
+                    <table class="table table-bordered merge-preview-table dict-table" style="margin-top: 10px;">
+                        <thead>
+
+                            <!-- ROW 1 -->
+                            <tr>
+
+                                <th rowspan="3" style="width: 137px;">
+                                    Nodegroup
+                                </th>
+
+                                <!-- ko foreach: dictHeaderGroups -->
+
+                                    <!-- ko if: $index() === 0 || $data.top !== $parent.dictHeaderGroups()[$index()-1].top -->
+
+                                    <th data-bind="
+                                        text: top,
+                                        attr: {
+                                            colspan: $parent.dictHeaderGroups().filter(x => x.top === top).length
+                                        }">
+                                    </th>
+
+                                    <!-- /ko -->
+
+                                <!-- /ko -->
+
+                            </tr>
+
+                            <!-- ROW 2 -->
+                            <tr>
+
+                                <!-- ko foreach: dictHeaderGroups -->
+                                <th data-bind="text: uuid"></th>
+                                <!-- /ko -->
+
+                            </tr>
+
+                            <!-- ROW 3 -->
+                            <tr>
+
+                                <!-- ko foreach: dictHeaderGroups -->
+                                <th data-bind="text: bottom"></th>
+                                <!-- /ko -->
+
+                            </tr>
+
+                        </thead>
+
+                        <tbody data-bind="foreach: dictCountsTable">
+                            <tr data-bind="css: { 'ng-alt': $index() % 2 === 1 }">
+                                <td data-bind="text: cardName" style="white-space: normal;word-break: break-word; min-width: 220px;"></td>
+
+                                <!-- ko foreach: $parent.dictCountsKeys -->
+                                <td data-bind="text: $parent[$data]"></td>
+                                <!-- /ko -->
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            
+            </div>
+
+
+        </div>
+    </div>
+
+    <div
+        class="tabbed-workflow-footer, etl-module-footer"
+        data-bind="visible: showPreviewTableWrite"
+    >
+        <button
+            style="margin-right: 8px"
+            data-bind="click: write, visible: showPreviewWrite"
+            class="btn btn-success"
+        >
+            <span data-bind="text: $root.translations.start"></span>
+        </button>
+
+         <button
+            style="margin-right: 8px"
+            data-bind="click: function () { window.location.reload(); }, visible: showPreviewWrite"
+            class="btn btn-danger"
+        >
+            <span data-bind="text: $root.translations.cancel"></span>
+        </button>
+    </div>
+</div>
+{% endblock task_details %}
+
+{% block etl_status %}
+
+<style>
+
+.dict-table th {
+    text-align: center;
+    vertical-align: middle !important;
+}
+
+.dict-table thead tr:nth-child(1) th {
+    background: #f5f5f5;
+    font-weight: bold;
+}
+
+.dict-table thead tr:nth-child(2) th {
+    font-size: 12px;
+}
+
+.dict-table thead tr:nth-child(3) th {
+    font-style: italic;
+}
+
+.custom-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: custom-spin 0.7s linear infinite;
+}
+
+@keyframes custom-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dict-table{
+  min-width: 1200px;   /* or 1200px depending on columns */
+  table-layout: fixed;
+}
+.sort-header {
+    white-space: nowrap;
+    vertical-align: middle !important;
+    font-weight: 600;
+}
+.merge-dict-table-wrap{
+  margin-top: 10px;
+  overflow-y: auto;
+  overflow-x: auto;
+  max-height: 500px;  
+ 
+  border-radius: 6px;
+  background: #fff;
+}
+
+.merge-preview-sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.merge-preview-sortable:hover {
+    background: #f5f7fa;
+}
+
+/* Base button styling */
+.sort-icon-btn {
+    position: relative;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 2px 4px;
+    font-size: 12px;
+    line-height: 1;
+    color: #888;
+    transition: color 0.15s;
+}
+.sort-icon-btn_x {
+    position: relative;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 2px 4px;
+    font-size: 15px;
+    line-height: 1;
+    color: #888;
+    transition: color 0.15s;
+}
+.sort-icon-btn:hover {
+    color: #000;
+}
+
+.sort-icon-btn.remove:hover {
+    color: #d9534f;
+}
+
+/* Tooltip container */
+.sort-icon-btn[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 130%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #333;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 999;
+}
+
+/* Tooltip pointer (triangle) */
+.sort-icon-btn[data-tooltip]::before {
+    content: "";
+    position: absolute;
+    bottom: 118%;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 6px;
+    border-style: solid;
+    border-color: #333 transparent transparent transparent;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+/* Show on hover */
+.sort-icon-btn:hover::after,
+.sort-icon-btn:hover::before {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-2px);
+}
+
+.merge-preview-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.merge-preview-card {
+    flex: 1 1 260px;
+    background: #f5f5f5;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+    padding: 10px 12px;
+}
+
+.merge-preview-card__title {
+    font-weight: 600;
+    color: #333;
+}
+
+.merge-preview-card__subtitle {
+    font-size: 12px;
+    color: #777;
+}
+
+.merge-preview-card__label {
+    font-size: 12px;
+    color: #555;
+}
+
+.merge-preview-tiles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.merge-preview-tile {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #fff;
+    border: 1px solid #dcdcdc;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.merge-preview-tile__id {
+    font-weight: 600;
+    color: #444;
+}
+
+.merge-preview-tile__resource {
+    color: #666;
+}
+
+.merge-preview-tile__top{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.merge-preview-tile__data{
+  margin-top: 6px;
+  padding-left: 2px;
+}
+
+.merge-preview-tile__row{
+  font-size: 13px;
+  line-height: 1.35;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.merge-preview-tile__label{
+  font-weight: 600;
+  color: #0b1f3a;
+  flex: 0 0 auto;
+}
+
+.merge-preview-tile__value{
+  color: #334155;
+  flex: 1 1 auto;
+  min-width: 0;              /* required for ellipsis inside flex */
+  cursor: pointer;
+}
+/* Collapsed state */
+.merge-preview-tile__value:not(.is-expanded) {
+  display: inline-block;
+  max-width: 220px;          
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Expanded state */
+.merge-preview-tile__value.is-expanded {
+  white-space: normal;
+  word-break: break-word;
+}
+.merge-preview-tile__value:hover {
+  color: #1d4ed8;
+}
+.merge-preview-status{
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid #ddd;
+  background: #fff;
+  color: #555;
+}
+
+.merge-preview-status--added,.merge-preview-status--included{
+  border-color: #b7e1c1;
+  background: #e9f8ee;
+  color: #1b7a3a;
+}
+
+.merge-preview-status--merged{
+  border-color: #b9d7ff;
+  background: #eaf3ff;
+  color: #1d4ed8;
+}
+
+.merge-preview-status--deleted, .merge-preview-status--excluded{
+  border-color: #f5504a;
+  background: #f8d7da;
+  color: #721c24;
+}
+
+.merge-preview-status--unknown{
+  border-color: #e5e7eb;
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.merge-preview-table-wrap{
+  margin-top: 10px;
+  overflow: auto;           /* horizontal scroll if needed */
+  max-height: 70vh;         /* keeps UI usable */
+  border-radius: 6px;
+  background: #fff;
+}
+
+.merge-preview-table{
+  margin: 0;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.merge-preview-table th,
+.merge-preview-table td{
+  vertical-align: top;
+  word-break: break-word;
+}
+
+/* prevent sticky header resize */
+.merge-preview-table thead th {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* ==========================================
+   STICKY MULTI HEADER
+========================================== */
+
+.merge-preview-table thead th {
+    position: sticky;
+    background: #f5f5f5;
+    z-index: 10;
+
+    border-top: 1px solid #ddd !important;
+    border-bottom: 1px solid #ddd !important;
+}
+
+/* ROW 1 */
+.merge-preview-table thead tr:nth-child(1) th {
+    top: 0;
+    z-index: 30;
+    height: 42px;
+    min-height: 42px;
+    max-height: 42px;
+}
+
+
+.merge-preview-table thead tr:nth-child(2) th {
+    top: 42px;
+    z-index: 29;
+    height: 42px;
+    min-height: 42px;
+    max-height: 42px;
+}
+/* ROW 3 */
+.merge-preview-table thead tr:nth-child(3) th {
+    top: 84px;
+    z-index: 28;
+    height: 42px;
+    min-height: 42px;
+    max-height: 42px;
+}
+
+/* LEFT MAIN HEADER */
+.merge-preview-table thead th[rowspan] {
+    z-index: 40 !important;
+    left: 0;
+    background: #f5f5f5;
+}
+
+/* remove visual gaps */
+.merge-preview-table thead tr {
+    margin: 0;
+    padding: 0;
+}
+
+.merge-preview-table thead th {
+    box-sizing: border-box;
+}
+
+.mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.tiledata-row{
+  display:flex;
+  gap:6px;
+  align-items:flex-start;
+  line-height:1.35;
+  margin: 2px 0;
+}
+
+.tiledata-label{
+  font-weight: 600;
+  color: #0b1f3a;
+  flex: 0 0 auto;
+}
+
+.tiledata-value{
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: pointer;
+  color: #334155;
+}
+
+/* collapsed */
+.tiledata-value:not(.is-expanded){
+  display:inline-block;
+  max-width: 60%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+/* expanded */
+.tiledata-value.is-expanded{
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* Color by nodegroup (not by row) */
+.merge-preview-table tr.ng-alt td {
+  background: #f6f8ff;
+}
+
+/* Ensure rowspan cells match the group background nicely */
+.merge-preview-table td {
+  background-clip: padding-box;
+}
+
+.merge-summary-wrap{
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.merge-summary-table{
+  width: 100%;
+  table-layout: fixed;
+  background: #fff;
+}
+
+.merge-summary-title{
+  background: #dbe7ff;  /* light blue like your sheet */
+  font-weight: 700;
+  text-align: center;
+}
+
+.merge-summary-label{
+  width: 22%;
+  font-weight: 700;
+  background-color: white;
+  white-space: nowrap;
+}
+
+.merge-summary-list{
+  margin: 0;
+  padding-left: 18px;
+}
+
+.merge-summary-list li{
+  margin: 2px 0;
+}
+
+</style>
+
+<div class="bulk-load-status">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h4 class="summary-title" style="margin: 0;">
+            <span data-bind="text: $root.translations.bulkDataEditSummary"></span>
+        </h4>
+
+        <button
+            class="btn btn-default"
+            style="background-color: #8cc74f; color: #fff; border-radius: 4px; height:33px; width:120px;"
+            data-bind="click: exportChangeSummaryCSV, visible: hasChangeSummary">
+            Download CSV
+        </button>
+    </div>
+    
+</div>
+{% endblock etl_status %}
+
+{% block loading_status %}
+<div class="bulk-load-status">
+    <h4 class="summary-header">
+        <span
+            data-bind="text: $root.translations.bulkEditProgressDetails"
+        ></span>
+    </h4>
+    <div
+        style="display: flex"
+        data-bind="click: function() { showStatusDetails(!showStatusDetails())}"
+    >
+        <a
+            class="etl-status-link etl-loading-metadata-key"
+            data-bind="text: $root.translations.bulkEditStatus + ':'"
+        ></a>
+        <div style="padding: 1px 4px">
+            <div>
+                <!-- ko ifnot: showStatusDetails -->
+                <i class="fa fa-caret-right fa-lg"></i>
+                <!-- /ko -->
+                <!-- ko if: showStatusDetails -->
+                <i class="fa fa-caret-down fa-lg"></i>
+                <!-- /ko -->
+            </div>
+        </div>
+        <div style="display: flex; flex-direction: column">
+            <div
+                class="etl-loading-metadata-value"
+                data-bind="
+                text: selectedLoadEvent() ?
+                selectedLoadEvent().status == 'indexed' ? $root.translations.completed
+                : selectedLoadEvent().status == 'completed' ? $root.translations.indexing
+                : selectedLoadEvent().status == 'validated' ? $root.translations.running
+                : selectedLoadEvent().status == 'running' ? $root.translations.running
+                : selectedLoadEvent().status == 'reversing' ? $root.translations.unloading
+                : selectedLoadEvent().status == 'unloaded' ? $root.translations.unloaded
+                : selectedLoadEvent().status == 'cancelled' ? $root.translations.cancelled
+                : $root.translations.failed
+            : $root.translations.failed
+            "
+            ></div>
+            <!-- ko if: showStatusDetails -->
+            <div data-bind="foreach: statusDetails">
+                <div data-bind="text: $data"></div>
+            </div>
+            <div
+                data-bind="ifnot: ['indexed','failed'].includes(selectedLoadEvent().status)"
+            >
+                <i class="fa fa-spin fa-spinner fa-lg"></i>
+            </div>
+            <!-- /ko -->
+        </div>
+    </div>
+    <div style="padding-top: 10px">
+        <span
+            class="etl-loading-metadata-key"
+            data-bind="text: $root.translations.bulkEditStarted + ':'"
+        ></span>
+        <span
+            class="etl-loading-metadata-value"
+            data-bind="text: selectedLoadEvent() ? formatTime(selectedLoadEvent().load_start_time) : ''"
+        ></span>
+    </div>
+    <div
+        data-bind="if: selectedLoadEvent() && selectedLoadEvent().load_end_time"
+    >
+        <span
+            class="etl-loading-metadata-key"
+            data-bind="text: $root.translations.bulkEditEnded + ':'"
+        ></span>
+        <span
+            class="etl-loading-metadata-value"
+            data-bind="text: selectedLoadEvent() ? formatTime(selectedLoadEvent().load_end_time) : ''"
+        ></span>
+    </div>
+    <div
+        data-bind="if: selectedLoadEvent() && selectedLoadEvent().load_end_time"
+    >
+        <span
+            class="etl-loading-metadata-key"
+            data-bind="text: $root.translations.bulkEditDuration + ':'"
+        ></span>
+        <span
+            class="etl-loading-metadata-value"
+            data-bind="text: selectedLoadEvent() ? timeDifference(selectedLoadEvent().load_end_time, selectedLoadEvent().load_start_time) : ''"
+        ></span>
+    </div>
+    <div
+        style="padding-top: 10px"
+        data-bind="if: selectedLoadEvent() && selectedLoadEvent().indexed_time"
+    >
+        <span
+            class="etl-loading-metadata-key"
+            data-bind="text: $root.translations.indexingEnded + ':'"
+        ></span>
+        <span
+            class="etl-loading-metadata-value"
+            data-bind="text: selectedLoadEvent() ? formatTime(selectedLoadEvent().indexed_time) : ''"
+        ></span>
+    </div>
+    <div
+        data-bind="if: selectedLoadEvent() && selectedLoadEvent().indexed_time"
+    >
+        <span
+            class="etl-loading-metadata-key"
+            data-bind="text: $root.translations.indexingDuration + ':'"
+        ></span>
+        <span
+            class="etl-loading-metadata-value"
+            data-bind="text: selectedLoadEvent() ? timeDifference(selectedLoadEvent().indexed_time, selectedLoadEvent().load_end_time) : ''"
+        ></span>
+    </div>
+    <!-- Edit Details -->
+     
+
+    <div class="summary-header">
+        <span data-bind="text: $root.translations.editDetails"></span>
+    </div>
+    <div class="merge-summary-wrap" style="margin-top: 10px;">
+
+        <table class="table table-bordered merge-summary-table">
+            <thead>
+                <tr>
+                    <th colspan="2" class="merge-summary-title">
+                        Merge Resource Data
+                    </th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                <!-- Base Resource -->
+                <tr>
+                    <td class="merge-summary-label">Base Resource</td>
+                    <td>
+                        <a target="_blank"
+                        rel="noopener"
+                        data-bind="
+                            text: loadDetailsBaseDisplay,
+                            attr: { href: '/report/' + (load_details.baseResource || '') }
+                        ">
+                        </a>
+                    </td>
+                </tr>
+
+                <!-- Merge Resources -->
+                <tr>
+                    <td class="merge-summary-label">Merge Resource(s)</td>
+                    <td>
+
+                        <!-- if empty -->
+                        <div data-bind="if: !load_details.mergeResources">—</div>
+
+                        <!-- list -->
+                        <ul class="merge-summary-list"
+                            data-bind="foreach: (Array.isArray(load_details.mergeResources) 
+                                                ? load_details.mergeResources 
+                                                : [load_details.mergeResources])">
+
+                            <li>
+                                <a target="_blank"
+                                rel="noopener"
+                                data-bind="
+                                    text: $parent.getResourceDisplay($data),
+                                    attr: { href: '/report/' + $data }
+                                ">
+                                </a>
+                            </li>
+
+                        </ul>
+
+                    </td>
+                </tr>
+
+            </tbody>
+        </table>
+
+    </div>
+    
+    <div data-bind="if: editHistoryUrl">
+        <span
+            class="etl-loading-metadata-key"
+            data-bind="text: $root.translations.listOfDeletedData + ':'"
+        ></span>
+        <span class="etl-loading-metadata-value">
+            <a
+                class="etl-status-link"
+                target="_blank"
+                data-bind="text: $root.translations.viewInEditLog, attr: { href: editHistoryUrl }"
+            ></a>
+        </span>
+    </div>
+
+
+
+    <!-- FINAL DATA TABLE -->
+    <div data-bind="if: finalDataGroups().length" style="margin-top: 20px;">
+
+        <h4 style="margin-bottom: 10px;">Final Merged Data</h4>
+         <div>
+                
+                <input
+                    data-bind="value: filterFinalDataQuery, valueUpdate: 'afterkeydown'"
+                    id="filter-final-data"
+                    placeholder="Type to filter final data based on text"
+                    type="text"
+                    style="border-radius: 4px; width: 300px; min-width: 10em; height:33px;"
+                >
+                <button
+                    style="
+                        background-color: #8cc74f;
+                        color: #fff;
+                        border: none;
+                        border-radius: 4px;
+                        font-weight: normal;
+                        height:33px;
+                        width:120px;
+                    "
+                    type="submit"
+                    data-bind="click: filterFinalData"
+                >
+                    Filter
+                </button>
+                <button
+                    style="
+                        background-color: #dc3545;
+                        color: #fff;
+                        border: none;
+                        border-radius: 4px;
+                        padding: 4px 8px;
+                        cursor: pointer;
+                        font-size: 12px;
+                        height:33px;
+                        width:120px;
+                    "
+                    type="submit"
+                    data-bind="click: resetFinalDataFilter"
+                >
+                    Reset Filters
+                </button>
+            </div>
+
+
+        <div class="merge-preview-table-wrap">
+            <table class="table table-bordered merge-preview-table dict-table">
+
+                <thead>
+                    <tr>
+                        <th class="merge-preview-sortable" style="width: 23%;"
+                            data-bind="click: function() { togglePreviewSort('nodegroupName'); }, text: 'Nodegroup' + getPreviewSortIndicator('nodegroupName')"></th>
+                        <th class="merge-preview-sortable" style="width: 8%;"
+                            data-bind="click: function() { togglePreviewSort('status'); }, text: 'Status' + getPreviewSortIndicator('status')"></th>
+                        <th class="merge-preview-sortable" style="width: 12%;"
+                            data-bind="click: function() { togglePreviewSort('tileId'); }, text: 'Tile' + getPreviewSortIndicator('tileId')"></th>
+                        <th class="merge-preview-sortable" style="width: 14%;"
+                            data-bind="click: function() { togglePreviewSort('resourceId'); }, text: 'Resource' + getPreviewSortIndicator('resourceId')"></th>
+                        <th class="merge-preview-sortable" style="width: 33%;"
+                            data-bind="click: function() { togglePreviewSort('tiledata'); }, text: 'Tile data' + getPreviewSortIndicator('tiledata')"></th>
+                        <th class="merge-preview-sortable" style="width: 10%;"
+                                data-bind="click: function() { togglePreviewSort('tiledataStatus'); }, text: 'Tile data Status' + getPreviewSortIndicator('tiledataStatus')"></th>
+                            
+
+                    </tr>
+                </thead>
+
+                <tbody data-bind="foreach: finalPagedRows">
+                    <tr data-bind="css: { 'ng-alt': (groupIndex % 2) === 1 }">
+
+                        <!-- Nodegroup -->
+                        <!-- ko if: showGroupCell -->
+                        <td data-bind="attr: { rowspan: rowspan }">
+                            <div>
+                                <div data-bind="text: nodegroupName"></div>
+                                <div class="mono" style="font-size:12px; color:#777;"
+                                data-bind="text: nodegroupId"></div>
+                            </div>
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Status column -->
+                        <!-- ko if: showStatusCell -->
+                        <td data-bind="attr: { rowspan: statusRowspan }">
+                            <span class="merge-preview-status"
+                                  data-bind="text: status || 'Unknown',
+                                  css: 'merge-preview-status--' + ((status || 'Unknown').toLowerCase())">
+                            </span>
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Tile -->
+                        <!-- ko if: showTileCell -->
+                        <td data-bind="attr: { rowspan: tileRowspan }">
+
+                            <div style="display:flex; align-items:center; gap:6px;">
+
+                                <!-- Tile ID (expandable) -->
+                                <div class="mono" data-bind="let: { expanded: ko.observable(false) }">
+                                    <span
+                                        data-bind="
+                                            text: expanded()
+                                                ? (tileId || '—')
+                                                : (tileId ? tileId.substring(0, 5) + '…' : '—'),
+                                            click: function(){ if (tileId) expanded(!expanded()) },
+                                            attr: { title: tileId || '' },
+                                            css: { 'is-clickable': tileId }
+                                        ">
+                                    </span>
+                                </div>
+
+                                <!--  FLAG -->
+
+                                <!-- ko if: flag -->
+                                <!--
+                                <span class="merge-preview-status"
+                                    data-bind="
+                                        text: flag,
+                                        css: 'merge-preview-status--' + flag">
+                                </span>
+                                -->
+                                <!-- /ko -->
+
+                            </div>
+
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Resource -->
+                        <!-- ko if: showResourceCell -->
+                        <td class="mono" data-bind="attr: { rowspan: resourceRowspan }">
+                            <!-- ko if: resourceId -->
+                            <a target="_blank"
+                            data-bind="text: resourceId, attr: { href: '/report/' + resourceId }"></a>
+                            <!-- /ko -->
+                            <!-- ko ifnot: resourceId -->—<!-- /ko -->
+                        </td>
+                        <!-- /ko -->
+
+                        <!-- Tile data -->
+                         <td>
+                            <div class="tiledata-row" data-bind="let: { expanded: ko.observable(false) }">
+
+                                <!-- Label -->
+                                <div class="tiledata-label">
+                                    <span data-bind="text: tiledataLabel || '—'"></span>:
+                                </div>
+
+                                <!-- Value -->
+                                <div class="tiledata-value"
+                                    data-bind="
+                                        text: tiledataValue || '—',
+                                        click: function(){ expanded(!expanded()) },
+                                        css: { 'is-expanded': expanded() },
+                                        attr: { title: tiledataValue || '' }
+                                    ">
+                                </div>
+
+                                
+
+                            </div>
+                            
+
+                        </td>
+                        <td>
+                            <!-- Status -->   
+                            <div style="min-width: 80px;">
+                                <span class="merge-preview-status"
+                                    data-bind="text: tiledataStatus,
+                                            css: 'merge-preview-status--' + (tiledataStatus || '').toLowerCase()">
+                                </span>
+                            </div>
+                        </td>
+
+
+                        
+
+                    </tr>
+                </tbody>
+
+            </table>
+        </div>
+
+    </div>
+    <!-- pagination controls for final data table -->
+    <div data-bind="if: finalDataGroups().length">
+        <div style="display:flex; align-items:center; gap:10px; margin-top:12px;">
+
+            <button class="btn btn-default"
+                    data-bind="click: function(){ finalCurrentPage(finalCurrentPage() - 1) },
+                            enable: finalCurrentPage() > 1">
+                Prev
+            </button>
+
+            <span>
+                Page <strong data-bind="text: finalCurrentPage"></strong>
+                /
+                <strong data-bind="text: finalTotalPages"></strong>
+                (<span data-bind="text: finalRows().length"></span> rows,
+                <span data-bind="text: finalDataGroups().length"></span> nodegroups)
+            </span>
+
+            <button class="btn btn-default"
+                    data-bind="click: function(){ finalCurrentPage(finalCurrentPage() + 1) },
+                            enable: finalCurrentPage() < finalTotalPages()">
+                Next
+            </button>
+
+        </div>
+    </div>
+    <!-- Dict counts AFTER MERGE table -->
+    <div data-bind="if: finalDictCountsTable().length" style="margin-top: 18px;">
+
+        <!-- (optional) title -->
+        <h4 style="margin-bottom: 10px;">Dict Counts After Merge</h4>
+
+        <div class="merge-dict-table-wrap">
+            <table class="table table-bordered merge-preview-table dict-table" style="margin-top: 10px;">
+                
+               <thead>
+
+                    <!-- ROW 1 -->
+                    <tr>
+
+                        <th rowspan="3" style="width: 120px;">
+                            Nodegroup
+                        </th>
+
+                        <!-- ko foreach: finalDictHeaderGroups -->
+
+                            <!-- show only first time -->
+                            <!-- ko if: $index() === 0 || $data.top !== $parent.finalDictHeaderGroups()[$index()-1].top -->
+
+                            <th data-bind="
+                                text: top,
+                                attr: {
+                                    colspan: $parent.finalDictHeaderGroups().filter(x => x.top === top).length
+                                }">
+                            </th>
+
+                            <!-- /ko -->
+
+                        <!-- /ko -->
+
+                    </tr>
+
+
+                    <!-- ROW 2 -->
+                    <tr>
+
+                        <!-- ko foreach: finalDictHeaderGroups -->
+
+                        <th data-bind="text: uuid"></th>
+
+                        <!-- /ko -->
+
+                    </tr>
+
+
+                    <!-- ROW 3 -->
+                    <tr>
+
+                        <!-- ko foreach: finalDictHeaderGroups -->
+
+                        <th data-bind="text: bottom"></th>
+
+                        <!-- /ko -->
+
+                    </tr>
+
+                </thead>
+
+                <tbody data-bind="foreach: finalDictCountsTable">
+                    <tr data-bind="css: { 'ng-alt': $index() % 2 === 1 }">
+                        
+                        <td data-bind="text: cardName" style="white-space: normal;word-break: break-word; min-width: 220px;"></td>
+
+                        <!-- ko foreach: $parent.finalDictCountsKeys -->
+                        <td data-bind="text: $parent[$data]"></td>
+                        <!-- /ko -->
+
+                    </tr>
+                </tbody>
+
+            </table>
+        </div>
+
+    </div>
+    <!--resource count table-->
+     <div data-bind="if: hasChangeSummary" style="margin-top: 25px;">
+        <div class="summary-header">
+            <span>Source Reference Counts</span>
+        </div>
+
+        <table class="table table-striped" style="margin-top: 10px; width: 100%;">
+            <thead>
+                <tr>
+                    <th style="width: 60%;">Resource</th>
+                    <th style="width: 40%;">Source Reference Count</th>
+                </tr>
+            </thead>
+
+                <tbody data-bind="foreach: changeSummary.sourceReferenceCounts">
+                    <tr>
+                        <td>
+                             <span data-bind="
+                                text:
+                                    $index() === 0
+                                        ? $parent.getResourceDisplay(resource) + ' – before merge'
+                                    : $index() === ($parent.changeSummary.sourceReferenceCounts().length - 2)
+                                        ? $parent.getResourceDisplay(resource) + ' – after merge'
+                                    : $index() === ($parent.changeSummary.sourceReferenceCounts().length - 1)
+                                        ? 'Total number of unique source references across all merged resources'
+                                    : $parent.getResourceDisplay(resource)
+                            "></span>
+                        </td>
+
+                        <td data-bind="text: sourceReferenceCount"></td>
+                    </tr>
+                </tbody>
+        </table>
+    </div>
+
+                                                                        
+</div>
+{% endblock loading_status %}
+
+{% block etl_error_report %}
+
+{% endblock etl_error_report %}
