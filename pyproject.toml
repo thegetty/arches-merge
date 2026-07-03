@@ -22,7 +22,7 @@ requires-python = ">=3.10"
 dependencies = [
     "arches>=7.6.17,<7.7.0",
 ]
-version = "0.0.1"
+version = "0.0.4"
 
 [project.urls]
 Homepage = "https://archesproject.org/"

@@ -34,7 +34,7 @@ from arches.app.datatypes.datatypes import DataTypeFactory
 from arches.app.models.graph import Graph
 
 
-import arches_provenance.tasks as tasks
+import arches_merge.tasks as tasks
 
 
 details = {
@@ -2535,8 +2535,8 @@ class Resourcesmerge(BaseBulkEditor):
     def get_tiles_value():
         with connection.cursor() as cursor:
             cursor.execute(
-                """select * 
-                from tiles 
+                """select *
+                from tiles
                 where resourceinstanceid ='f4e3e7d5-7f70-32b6-8377-1ff48d60d91a' and nodegroupid='48d04315-747d-11ec-b195-0a9473e82189'"""
             )
 
@@ -2544,7 +2544,7 @@ class Resourcesmerge(BaseBulkEditor):
 
             cursor.execute(
                 """select *
-                    from tiles 
+                    from tiles
                     where tileid='721dcdf6-cfdb-43fa-9bf6-5ad990907932'"""
             )
 
@@ -2816,8 +2816,8 @@ class Resourcesmerge(BaseBulkEditor):
     def get_source_references_ids(graphid):
         with connection.cursor() as cursor:
             cursor.execute(
-                """select nodeid 
-                    from nodes 
+                """select nodeid
+                    from nodes
                     where nodes.name like 'source_reference' and nodes.graphid= %s """,
                 (graphid,),
             )
