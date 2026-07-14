@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 import re
 
+from arches import __version__ as arches_version
 import arches.app.utils.task_management as task_management
 from arches.app.etl_modules.base_data_editor import BaseBulkEditor, HttpRequest
 from arches.app.etl_modules.decorators import load_data_async
@@ -32,6 +33,7 @@ from django.utils.decorators import method_decorator
 from django.utils.translation import gettext as _
 from arches.app.datatypes.datatypes import DataTypeFactory
 from arches.app.models.graph import Graph
+from packaging.version import Version
 
 
 import arches_merge.tasks as tasks
@@ -57,6 +59,32 @@ details = {
 logger = logging.getLogger(__name__)
 
 ALLOWED_UNDO_DAYS = 7
+
+if Version(arches_version) >= Version("8.0"):
+    RXR_FROM_FIELD = "from_resource"
+    RXR_TO_FIELD = "to_resource"
+    RXR_NODE_FIELD = "node"
+    RXR_TILE_FIELD = "tile"
+else:
+    RXR_FROM_FIELD = "resourceinstanceidfrom"
+    RXR_TO_FIELD = "resourceinstanceidto"
+    RXR_NODE_FIELD = "nodeid"
+    RXR_TILE_FIELD = "tileid"
+
+RXR_LOG_FIELD_ALIASES = {
+    RXR_FROM_FIELD: (
+        RXR_FROM_FIELD,
+        "resourceinstanceidfrom"
+        if RXR_FROM_FIELD != "resourceinstanceidfrom"
+        else "from_resource",
+    ),
+    RXR_TO_FIELD: (
+        RXR_TO_FIELD,
+        "resourceinstanceidto"
+        if RXR_TO_FIELD != "resourceinstanceidto"
+        else "to_resource",
+    ),
+}
 
 
 class MissingRequiredInputError(Exception):
@@ -124,7 +152,9 @@ class Resourcesmerge(BaseBulkEditor):
         edit.oldvalue = self._serialize_obj(old_resource_x_resource)
         edit.newvalue = self._serialize_obj(resource_x_resource)
         edit.timestamp = datetime.now()
-        edit.nodegroupid = resource_x_resource.nodeid.nodegroup.nodegroupid
+        edit.nodegroupid = getattr(
+            resource_x_resource, RXR_NODE_FIELD
+        ).nodegroup.nodegroupid
         edit.edittype = "resourcexresource edit"
         edit.transactionid = UUID(self.loadid)
         edit.save()
@@ -135,7 +165,9 @@ class Resourcesmerge(BaseBulkEditor):
         edit.oldvalue = self._serialize_obj(resource_x_resource)
         edit.timestamp = datetime.now()
         edit.edittype = "resourcexresource delete"
-        edit.nodegroupid = resource_x_resource.nodeid.nodegroup.nodegroupid
+        edit.nodegroupid = getattr(
+            resource_x_resource, RXR_NODE_FIELD
+        ).nodegroup.nodegroupid
         edit.transactionid = UUID(self.loadid)
         edit.save()
 
@@ -214,10 +246,14 @@ class Resourcesmerge(BaseBulkEditor):
         return None
 
     def _get_resource_id_from_log_value(self, value: Any, attr_name: str) -> str | None:
+        field_names = RXR_LOG_FIELD_ALIASES.get(attr_name, (attr_name,))
         for obj in self._deserialize_models(value):
-            resource_id = self._extract_related_resource_id(obj, attr_name + "_id")
-            if resource_id:
-                return resource_id
+            for field_name in field_names:
+                resource_id = self._extract_related_resource_id(
+                    obj, field_name + "_id"
+                )
+                if resource_id:
+                    return resource_id
         return None
 
     def _format_edit_log_label(self, log: EditLog) -> str:
@@ -336,16 +372,16 @@ class Resourcesmerge(BaseBulkEditor):
 
         if edittype == "resourcexresource edit":
             new_from = self._get_resource_id_from_log_value(
-                log.newvalue, "resourceinstanceidfrom"
+                log.newvalue, RXR_FROM_FIELD
             )
             new_to = self._get_resource_id_from_log_value(
-                log.newvalue, "resourceinstanceidto"
+                log.newvalue, RXR_TO_FIELD
             )
             old_from = self._get_resource_id_from_log_value(
-                log.oldvalue, "resourceinstanceidfrom"
+                log.oldvalue, RXR_FROM_FIELD
             )
             old_to = self._get_resource_id_from_log_value(
-                log.oldvalue, "resourceinstanceidto"
+                log.oldvalue, RXR_TO_FIELD
             )
 
             new_involvement = any(
@@ -365,10 +401,10 @@ class Resourcesmerge(BaseBulkEditor):
 
         if edittype == "resourcexresource delete":
             old_from = self._get_resource_id_from_log_value(
-                log.oldvalue, "resourceinstanceidfrom"
+                log.oldvalue, RXR_FROM_FIELD
             )
             old_to = self._get_resource_id_from_log_value(
-                log.oldvalue, "resourceinstanceidto"
+                log.oldvalue, RXR_TO_FIELD
             )
             if base_id and any(
                 rid == base_id for rid in (old_from, old_to) if rid is not None
@@ -1089,8 +1125,8 @@ class Resourcesmerge(BaseBulkEditor):
                                 ) in ResourceXResource.objects.filter(
                                     resourcexid=infoTiledata["resourceXresourceId"]
                                 ):
-                                    resource_x_resource.resourceinstanceidfrom = ""
-                                    resource_x_resource.tileid = base
+                                    setattr(resource_x_resource, RXR_FROM_FIELD, "")
+                                    setattr(resource_x_resource, RXR_TILE_FIELD, base)
                                     self._resource_x_resource_save(resource_x_resource)
 
                                 mergeBaseResource[key].append(infoTiledata)
@@ -1108,7 +1144,9 @@ class Resourcesmerge(BaseBulkEditor):
                         tile.resourceinstance = Resource.objects.get(pk=baseId)
                         self._tile_save(tile)
                 else:
-                    for rxr in ResourceXResource.objects.filter(tileid=value.tileid):
+                    for rxr in ResourceXResource.objects.filter(
+                        **{RXR_TILE_FIELD: value.tileid}
+                    ):
                         self._resource_x_resource_delete(rxr)
 
                     for tile in Tile.objects.filter(tileid=value.tileid):
@@ -1186,9 +1224,13 @@ class Resourcesmerge(BaseBulkEditor):
                 else:
                     if not flag_update:
                         for rxr in ResourceXResource.objects.filter(
-                            tileid=value.tileid
+                            **{RXR_TILE_FIELD: value.tileid}
                         ):
-                            rxr.resourceinstanceidfrom = Resource.objects.get(pk=baseId)
+                            setattr(
+                                rxr,
+                                RXR_FROM_FIELD,
+                                Resource.objects.get(pk=baseId),
+                            )
                             self._resource_x_resource_save(rxr)
 
                         for tile in Tile.objects.filter(tileid=value.tileid):
@@ -1230,7 +1272,7 @@ class Resourcesmerge(BaseBulkEditor):
                             ):
                                 tiledata_merge[key] = tiledata_value[key]
                         for rxr in ResourceXResource.objects.filter(
-                            tileid=value.tileid
+                            **{RXR_TILE_FIELD: value.tileid}
                         ):
                             self._resource_x_resource_delete(rxr)
 
@@ -1282,10 +1324,16 @@ class Resourcesmerge(BaseBulkEditor):
                                 for rxr in ResourceXResource.objects.filter(
                                     resourcexid=resource["resourceXresourceId"]
                                 ):
-                                    rxr.resourceinstanceidfrom = Resource.objects.get(
-                                        pk=baseId
+                                    setattr(
+                                        rxr,
+                                        RXR_FROM_FIELD,
+                                        Resource.objects.get(pk=baseId),
                                     )
-                                    rxr.tileid = matching_tiles[important_value]
+                                    setattr(
+                                        rxr,
+                                        RXR_TILE_FIELD,
+                                        matching_tiles[important_value],
+                                    )
                                     self._resource_x_resource_save(rxr)
 
                                 mergesTiledata[keys[0]].append(resource)
@@ -1305,10 +1353,16 @@ class Resourcesmerge(BaseBulkEditor):
                                 for rxr in ResourceXResource.objects.filter(
                                     resourcexid=resource["resourceXresourceId"]
                                 ):
-                                    rxr.resourceinstanceidfrom = Resource.objects.get(
-                                        pk=baseId
+                                    setattr(
+                                        rxr,
+                                        RXR_FROM_FIELD,
+                                        Resource.objects.get(pk=baseId),
                                     )
-                                    rxr.tileid = matching_tiles[important_value]
+                                    setattr(
+                                        rxr,
+                                        RXR_TILE_FIELD,
+                                        matching_tiles[important_value],
+                                    )
                                     self._resource_x_resource_save(rxr)
 
                     if flag:
@@ -1369,7 +1423,7 @@ class Resourcesmerge(BaseBulkEditor):
         source_references_id = (
             str(self.get_source_references_ids(graph.graphid)[0])
             if self.get_source_references_ids(graph.graphid)
-            else "0"
+            else None
         )
 
         if not base_resource:
@@ -1606,11 +1660,12 @@ class Resourcesmerge(BaseBulkEditor):
                         unique_reference_resources.add(tile_data.get("resourceId"))
                 else:
                     dict_counts[card_name][str(base_resource) + "_pre"] += 1
-        reference_card_name = self.get_card_name_by_nodegroupid(source_references_id)
-        if len(unique_reference_resources) > 0:
-            dict_counts[reference_card_name][str(base_resource) + "_pre"] = len(
-                unique_reference_resources
-            )
+        if source_references_id:
+            reference_card_name = self.get_card_name_by_nodegroupid(source_references_id)
+            if len(unique_reference_resources) > 0:
+                dict_counts[reference_card_name][str(base_resource) + "_pre"] = len(
+                    unique_reference_resources
+                )
         added_tile = {}
         removed_tile = {}
         added_tiles = []
@@ -1900,7 +1955,11 @@ class Resourcesmerge(BaseBulkEditor):
                     for rxr in ResourceXResource.objects.filter(
                         resourcexid=info["resourceXresourceId"]
                     ):
-                        rxr.resourceinstanceidfrom = Resource.objects.get(pk=base)
+                        setattr(
+                            rxr,
+                            RXR_FROM_FIELD,
+                            Resource.objects.get(pk=base),
+                        )
                         self._resource_x_resource_save(rxr)
 
     def merge_reference(
@@ -1923,10 +1982,12 @@ class Resourcesmerge(BaseBulkEditor):
                             for rxr in ResourceXResource.objects.filter(
                                 resourcexid=info["resourceXresourceId"]
                             ):
-                                rxr.resourceinstanceidfrom = Resource.objects.get(
-                                    pk=baseId
+                                setattr(
+                                    rxr,
+                                    RXR_FROM_FIELD,
+                                    Resource.objects.get(pk=baseId),
                                 )
-                                rxr.tileid = base
+                                setattr(rxr, RXR_TILE_FIELD, base)
                                 self._resource_x_resource_save(rxr)
                             baseInfo[key].append(info)
                         else:
@@ -1965,10 +2026,12 @@ class Resourcesmerge(BaseBulkEditor):
                             for rxr in ResourceXResource.objects.filter(
                                 resourcexid=info["resourceXresourceId"]
                             ):
-                                rxr.resourceinstanceidfrom = Resource.objects.get(
-                                    pk=baseId
+                                setattr(
+                                    rxr,
+                                    RXR_FROM_FIELD,
+                                    Resource.objects.get(pk=baseId),
                                 )
-                                rxr.tileid = base
+                                setattr(rxr, RXR_TILE_FIELD, base)
 
                             baseInfo[key].append(info)
                             added_tile.append(str(valueMerge.tileid))
@@ -2152,8 +2215,14 @@ class Resourcesmerge(BaseBulkEditor):
 
         if parent_tile_exists and not flagParent and not key_of_string_value:
             if not matching_row:
-                for rxr in ResourceXResource.objects.filter(tileid=value.tileid):
-                    rxr.resourceinstanceidfrom = Resource.objects.get(pk=base)
+                for rxr in ResourceXResource.objects.filter(
+                    **{RXR_TILE_FIELD: value.tileid}
+                ):
+                    setattr(
+                        rxr,
+                        RXR_FROM_FIELD,
+                        Resource.objects.get(pk=base),
+                    )
                     self._resource_x_resource_save(rxr)
                 for tile in Tile.objects.filter(tileid=value.tileid):
                     tile.resourceinstance = Resource.objects.get(pk=base)
@@ -2455,14 +2524,22 @@ class Resourcesmerge(BaseBulkEditor):
                 same for same in base_tiles if same.nodegroup == tile.nodegroup
             ]
             if tiles_with_matching_nodegroup == []:
-                for rxr in ResourceXResource.objects.filter(tileid=tile.tileid):
-                    rxr.resourceinstanceidfrom = Resource.objects.get(pk=base_resource)
+                for rxr in ResourceXResource.objects.filter(
+                    **{RXR_TILE_FIELD: tile.tileid}
+                ):
+                    setattr(
+                        rxr,
+                        RXR_FROM_FIELD,
+                        Resource.objects.get(pk=base_resource),
+                    )
                     self._resource_x_resource_save(rxr)
 
                 tile.resourceinstance = Resource.objects.get(pk=base_resource)
                 self._tile_save(tile)
             else:
-                for rxr in ResourceXResource.objects.filter(tileid=tile.tileid):
+                for rxr in ResourceXResource.objects.filter(
+                    **{RXR_TILE_FIELD: tile.tileid}
+                ):
                     self._resource_x_resource_delete(rxr)
 
                 for matching_tile in tiles_with_matching_nodegroup:
@@ -3116,10 +3193,10 @@ class Resourcesmerge(BaseBulkEditor):
 
                 for merge_resource in merge_resources:
                     relations = ResourceXResource.objects.filter(
-                        resourceinstanceidto=merge_resource
+                        **{RXR_TO_FIELD: merge_resource}
                     )
                     relation_tile_ids: list[str] = list(
-                        map(lambda x: str(x.tileid), relations)
+                        map(lambda x: str(getattr(x, RXR_TILE_FIELD)), relations)
                     )
                     for relation_tile_id in relation_tile_ids:
                         match = re.search(r"\((.*?)\)", relation_tile_id)
@@ -3144,8 +3221,10 @@ class Resourcesmerge(BaseBulkEditor):
                         self._tile_save(relation_tile)
 
                     for rxr in relations:
-                        rxr.resourceinstanceidto = Resource.objects.get(
-                            pk=base_resource
+                        setattr(
+                            rxr,
+                            RXR_TO_FIELD,
+                            Resource.objects.get(pk=base_resource),
                         )
                         self._resource_x_resource_save(rxr)
 
@@ -3156,7 +3235,7 @@ class Resourcesmerge(BaseBulkEditor):
                         self._tile_save(tile)
 
                     for rxr in ResourceXResource.objects.filter(
-                        resourceinstanceidfrom=merge_resource
+                        **{RXR_FROM_FIELD: merge_resource}
                     ):
                         self._resource_x_resource_delete(rxr)
                     _ = GeoJSONGeometry.objects.filter(
