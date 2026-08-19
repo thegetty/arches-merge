@@ -1,5 +1,5 @@
 """
-Django settings for arches_merge project.
+Django settings for arches_resource_merge project.
 """
 
 import os
@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass
 
-APP_NAME = 'arches_merge'
+APP_NAME = 'arches_resource_merge'
 APP_VERSION = semantic_version.Version(major=0, minor=0, patch=0)
 APP_ROOT = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 MIN_ARCHES_VERSION = semantic_version.Version(major=7, minor=0, patch=0)
@@ -25,10 +25,10 @@ WEBPACK_LOADER = {
     },
 }
 
-DATATYPE_LOCATIONS.append('arches_merge.datatypes')
-FUNCTION_LOCATIONS.append('arches_merge.functions')
-ETL_MODULE_LOCATIONS.append('arches_merge.etl_modules')
-SEARCH_COMPONENT_LOCATIONS.append('arches_merge.search_components')
+DATATYPE_LOCATIONS.append('arches_resource_merge.datatypes')
+FUNCTION_LOCATIONS.append('arches_resource_merge.functions')
+ETL_MODULE_LOCATIONS.append('arches_resource_merge.etl_modules')
+SEARCH_COMPONENT_LOCATIONS.append('arches_resource_merge.search_components')
 
 LOCALE_PATHS.insert(0, os.path.join(APP_ROOT, 'locale'))
 
@@ -58,10 +58,10 @@ SECRET_KEY = 'django-insecure-qv!a3-1_#7fkg(s@xr+_mmg1u&zu4_k)*62))nu#y5pbqwm%em
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ROOT_URLCONF = "arches_merge.urls"
-ROOT_HOSTCONF = "arches_merge.hosts"
+ROOT_URLCONF = "arches_resource_merge.urls"
+ROOT_HOSTCONF = "arches_resource_merge.hosts"
 
-DEFAULT_HOST = "arches_merge"
+DEFAULT_HOST = "arches_resource_merge"
 
 # Modify this line as needed for your project to connect to elasticsearch with a password that you generate
 ELASTICSEARCH_CONNECTION_OPTIONS = {"request_timeout": 30, "verify_certs": False, "basic_auth": ("elastic", "E1asticSearchforArche5")}
@@ -79,11 +79,11 @@ ELASTICSEARCH_CONNECTION_OPTIONS = {"request_timeout": 30, "verify_certs": False
 # Or Kibana: https://www.elastic.co/guide/en/kibana/current/api-keys.html
 
 # a prefix to append to all elasticsearch indexes, note: must be lower case
-ELASTICSEARCH_PREFIX = 'arches_merge'
+ELASTICSEARCH_PREFIX = 'arches_resource_merge'
 
 ELASTICSEARCH_CUSTOM_INDEXES = []
 # [{
-#     'module': 'arches_merge.search_indexes.sample_index.SampleIndex',
+#     'module': 'arches_resource_merge.search_indexes.sample_index.SampleIndex',
 #     'name': 'my_new_custom_index', <-- follow ES index naming rules
 #     'should_update_asynchronously': False  <-- denotes if asynchronously updating the index would affect custom functionality within the project.
 # }]
@@ -107,7 +107,7 @@ DATABASES = {
         "CONN_MAX_AGE": 0,
         "ENGINE": "django.contrib.gis.db.backends.postgis",
         "HOST": "localhost",
-        "NAME": "arches_merge",
+        "NAME": "arches_resource_merge",
         "OPTIONS": {},
         "PASSWORD": "postgis",
         "PORT": "5432",
@@ -145,7 +145,7 @@ INSTALLED_APPS = (
     "oauth2_provider",
     "django_celery_results",
     # "silk",
-    "arches_merge",  # Ensure the project is listed before any other arches applications
+    "arches_resource_merge",  # Ensure the project is listed before any other arches applications
 )
 
 # Placing this last ensures any templates provided by Arches Applications
@@ -188,7 +188,7 @@ TEMPLATES = build_templates_config(
 ALLOWED_HOSTS = []
 
 SYSTEM_SETTINGS_LOCAL_PATH = os.path.join(APP_ROOT, 'system_settings', 'System_Settings.json')
-WSGI_APPLICATION = 'arches_merge.wsgi.application'
+WSGI_APPLICATION = 'arches_resource_merge.wsgi.application'
 
 # URL that handles the media served from MEDIA_ROOT, used for managing stored files.
 # It must end in a slash if set to a non-empty value.
@@ -252,7 +252,7 @@ RATE_LIMIT = "5/m"
 DATA_UPLOAD_MAX_MEMORY_SIZE = 15728640
 
 # Unique session cookie ensures that logins are treated separately for each app
-SESSION_COOKIE_NAME = 'arches_merge'
+SESSION_COOKIE_NAME = 'arches_resource_merge'
 
 # For more info on configuring your cache: https://docs.djangoproject.com/en/2.2/topics/cache/
 CACHES = {
@@ -412,7 +412,7 @@ SHOW_LANGUAGE_SWITCH = len(LANGUAGES) > 1
 
 # Implement this class to associate custom documents to the ES resource index
 # See tests.views.search_tests.TestEsMappingModifier class for example
-# ES_MAPPING_MODIFIER_CLASSES = ["arches_merge.search.es_mapping_modifier.EsMappingModifier"]
+# ES_MAPPING_MODIFIER_CLASSES = ["arches_resource_merge.search.es_mapping_modifier.EsMappingModifier"]
 
 try:
     from .package_settings import *

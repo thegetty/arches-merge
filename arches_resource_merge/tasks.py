@@ -7,7 +7,7 @@ from arches.app.models import models
 
 @shared_task
 def bulk_data_merge_resources(userid, load_id, baseResource, mergeResources,excluded_tile_ids=None):
-    from arches_merge.etl_modules import Resources_merge
+    from arches_resource_merge.etl_modules import Resources_merge
     logger = logging.getLogger(__name__)
 
     try:
@@ -38,6 +38,6 @@ def notify_completion(msg, user, notiftype_name=None, context=None):
 
 @shared_task
 def reverse_merge_load(load_id):
-    from arches_merge.etl_modules import Resources_merge
+    from arches_resource_merge.etl_modules import Resources_merge
     merge_resources = Resources_merge.Resourcesmerge(loadid=load_id)
     merge_resources.reverse_load(load_id)

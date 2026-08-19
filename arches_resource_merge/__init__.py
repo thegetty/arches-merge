@@ -1,0 +1,1 @@
+arches_resource_merge
