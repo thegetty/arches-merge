@@ -40,7 +40,7 @@ Example:
 ```python
 INSTALLED_APPS = (
     # Django, Arches, and project apps...
-    "arches_resource_merge.apps.ArchesResourceMergeConfig",
+    "arches_resource_merge",
 )
 
 # Keep arches.app last so extension templates and static assets can override
