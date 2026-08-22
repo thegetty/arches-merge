@@ -1,5 +1,5 @@
 import { beforeAll, vi } from 'vitest';
-import '@/arches_merge/declarations.d.ts';
+import '@/arches_resource_merge/declarations.d.ts';
 
 
 beforeAll(() => {

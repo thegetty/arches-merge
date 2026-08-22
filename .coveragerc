@@ -1,6 +1,6 @@
 [run]
 source =
-    arches_merge/
+    arches_resource_merge/
 
 omit =
     */python?.?/*

@@ -23,7 +23,7 @@ import os
 import sys
 
 if __name__ == "__main__":
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "arches_merge.settings")
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "arches_resource_merge.settings")
 
     from django.core.management import execute_from_command_line
 

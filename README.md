@@ -1,10 +1,13 @@
-# arches-merge
+# arches-resource-merge
 
-`arches-merge` is an Arches extension that adds a Bulk Data Manager ETL module
-for merging resource instances.
+`arches-resource-merge` is an Arches extension that adds a Bulk Data Manager ETL
+module for merging resource instances.
 
-The extension installs a `Merge Resources` ETL module that can merge two or more
-resources into one resource and provides an undo path for reversible merge tasks.
+The extension installs a `Merge Resources` task. It merges two or more resource
+instances into a selected base resource, integrates data from the merge
+resources into the base resource, and deletes the merged resources after the
+merge completes. The task is reversible through the Bulk Data Manager task
+history undo action.
 
 ## Requirements
 
@@ -18,18 +21,18 @@ Install the package into the same Python environment that runs the host Arches
 project:
 
 ```bash
-pip install arches-merge
+pip install arches-resource-merge
 ```
 
 For local development, install the checkout in editable mode:
 
 ```bash
-pip install -e /path/to/arches-merge
+pip install -e /path/to/arches-resource-merge
 ```
 
 ## Configure The Host Arches Project
 
-Add `arches_merge` to the host project's `INSTALLED_APPS` before
+Add `arches_resource_merge` to the host project's `INSTALLED_APPS` before
 `arches.app`.
 
 Example:
@@ -37,7 +40,7 @@ Example:
 ```python
 INSTALLED_APPS = (
     # Django, Arches, and project apps...
-    "arches_merge",
+    "arches_resource_merge",
 )
 
 # Keep arches.app last so extension templates and static assets can override
@@ -50,8 +53,8 @@ INSTALLED_APPS += ("arches.app",)
 Run the extension migration from the host Arches project:
 
 ```bash
-python manage.py showmigrations arches_merge
-python manage.py migrate arches_merge
+python manage.py showmigrations arches_resource_merge
+python manage.py migrate arches_resource_merge
 ```
 
 The migration registers the Bulk Data Manager ETL module:
@@ -82,8 +85,10 @@ For production deployments, use the host project's production build command.
 1. Start the host Arches application and Celery worker.
 2. Open Bulk Data Manager.
 3. Select `Merge Resources`.
-4. Choose the resources to merge and run the task.
-5. Use the task history undo action if a reversible merge needs to be rolled
+4. Choose the base resource that should remain after the merge.
+5. Choose the resources whose data should be merged into the base resource.
+6. Run the task.
+7. Use the task history undo action if a reversible merge needs to be rolled
    back.
 
 ## Development
@@ -91,7 +96,7 @@ For production deployments, use the host project's production build command.
 Useful local checks:
 
 ```bash
-python -m py_compile arches_merge/etl_modules/Resources_merge.py
+python -m py_compile arches_resource_merge/etl_modules/Resources_merge.py
 python manage.py check
 npm run build_development
 ```

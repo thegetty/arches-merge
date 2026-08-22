@@ -36,7 +36,7 @@ from arches.app.models.graph import Graph
 from packaging.version import Version
 
 
-import arches_merge.tasks as tasks
+import arches_resource_merge.tasks as tasks
 
 
 details = {
