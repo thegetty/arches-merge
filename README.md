@@ -91,6 +91,31 @@ For production deployments, use the host project's production build command.
 7. Use the task history undo action if a reversible merge needs to be rolled
    back.
 
+## URI Merging
+
+Equivalent URI tiles collapse into one entry when they use the same URL node,
+literal URI, and parent context. A nonblank source label can fill a blank retained
+label. Different nonblank labels, other conflicting metadata, pending edits, and
+directly attached relationship rows keep their separate entries. URI spelling is
+not normalized and different model fields are not combined. Existing duplicates
+already on the base are not retroactively removed.
+
+Preview and execution share the matching rule. Descendants are processed after
+their parents and reparented to the retained tile. The original source URI stays
+intact until normal logged cleanup; label edits and child reparenting also use the
+existing edit-log path. Native undo and its seven-day limit are unchanged.
+
+Focused checks (no database required):
+
+```bash
+python -m unittest discover -s tests -p test_resources_merge.py -v
+```
+
+These checks use an in-memory ORM boundary, including native edit-log replay.
+They do not replace approved database merge/unload and report acceptance tests.
+Count-based runner validation can flag intentionally collapsed tiles for review;
+verify semantic values and ownership instead of treating equal counts as proof.
+
 ## Development
 
 Useful local checks:
