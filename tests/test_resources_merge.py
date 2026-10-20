@@ -2,6 +2,7 @@
 import ast
 import copy
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -15,6 +16,8 @@ def load_merge_methods():
     for item in tree.body:
         if isinstance(item, ast.FunctionDef):
             body.append(item)
+        elif isinstance(item, ast.ClassDef) and item.name == "SnapshotJSONEncoder":
+            body.append(item)
         elif isinstance(item, ast.ClassDef) and item.name == "Resourcesmerge":
             item.bases = []
             item.decorator_list = []
@@ -25,7 +28,8 @@ def load_merge_methods():
             body.append(item)
     module = ast.parse("from __future__ import annotations\nimport json")
     module.body.extend(body)
-    namespace = {"RXR_FROM_FIELD": "resourceinstanceidfrom", "RXR_TILE_FIELD": "tileid"}
+    namespace = {"RXR_FROM_FIELD": "resourceinstanceidfrom", "RXR_TILE_FIELD": "tileid",
+                 "DjangoJSONEncoder": json.JSONEncoder, "datetime": datetime}
     exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
     return namespace
 
@@ -33,6 +37,39 @@ def load_merge_methods():
 class Query(list):
     def exists(self):
         return bool(self)
+
+
+class TimestampSnapshotTests(unittest.TestCase):
+    def test_snapshot_keeps_datetime_precision_and_standard_json_shape(self):
+        ns = load_merge_methods()
+        merge = ns["Resourcesmerge"].__new__(ns["Resourcesmerge"])
+        # The local harness has no Django; reproduce its millisecond default at the boundary.
+        class MillisecondEncoder(json.JSONEncoder):
+            def default(self, value):
+                return value.isoformat(timespec="milliseconds")
+
+        def serialize(format, objects, **kwargs):
+            fields = {"createdtime": objects[0], "name": "Original", "value": None}
+            kwargs.setdefault("cls", MillisecondEncoder)
+            return json.dumps([{"model": "models.resourceinstance", "pk": "resource", "fields": fields}],
+                              **kwargs)
+        ns["serializers"] = SimpleNamespace(serialize=serialize)
+        for tz in (None, timezone.utc, timezone(timedelta(hours=2))):
+            for microsecond in (0, 1, 123456, 999999):
+                value = datetime(2026, 10, 20, 12, 34, 56, microsecond, tzinfo=tz)
+                with self.subTest(value=value):
+                    snapshot = json.loads(merge._serialize_obj(value))[0]
+                    encoded = snapshot["fields"]["createdtime"]
+                    self.assertEqual(datetime.fromisoformat(encoded), value)
+                    self.assertEqual(snapshot["pk"], "resource")
+                    self.assertIsNone(snapshot["fields"]["value"])
+
+    def test_snapshot_encoder_retains_parent_encoder_for_other_types(self):
+        encoder = load_merge_methods()["SnapshotJSONEncoder"]()
+        self.assertEqual(encoder.encode({"count": 3, "values": [True, None]}),
+                         '{"count": 3, "values": [true, null]}')
+        with self.assertRaises(TypeError):
+            encoder.encode({"unsupported": {1}})
 
 
 class ResourcesMergeTests(unittest.TestCase):
@@ -50,6 +87,41 @@ class ResourcesMergeTests(unittest.TestCase):
     def tile(self, id, value, **kwargs):
         return SimpleNamespace(tileid=id, data={"type": copy.deepcopy(value)}, sortorder=0,
                                resourceinstance="source", parenttile=None, **kwargs)
+
+    def test_source_reference_preview_counts_blank_and_scalar_fields(self):
+        for value, expected in [(None, 0), ([], 0), ({"resourceId": "peer"}, 1),
+                                ([None, {}, {"resourceId": None}, {"resourceId": "peer"}], 1)]:
+            for data in ({"references": value}, {} if value is None else {"references": value}):
+                with self.subTest(data=data):
+                    base = SimpleNamespace(tileid="base-tile", data=copy.deepcopy(data))
+                    source = SimpleNamespace(tileid="source-tile", data=copy.deepcopy(data))
+                    self.ns["Tile"] = SimpleNamespace(objects=SimpleNamespace(
+                        filter=lambda **kw: [base] if kw["resourceinstance"] == "base" else [source]))
+                    self.merge.get_name_card = lambda tile: ("References", "references")
+                    self.merge.get_card_name_by_nodegroupid = lambda ng: "References"
+                    self.merge._process_merge_resource_preview = Mock(return_value=(
+                        ["source-tile"], [], [], ["peer"] if expected else []))
+                    result = self.merge.calculate_which_added_which_removed(
+                        "base", ["source"], source_references_id="references")
+                    self.assertEqual(result[4]["References"]["base_pre"], expected)
+
+    def test_blank_source_reference_display_is_empty(self):
+        for data in ({}, {"references": None}, {"references": []}):
+            with self.subTest(data=data):
+                datatype = SimpleNamespace(get_tile_data=lambda tile: data,
+                                           get_nodevalues=lambda value: value)
+                self.assertEqual(self.merge.get_display_values_source_reference(
+                    SimpleNamespace(), SimpleNamespace(nodeid="references"), datatype), [])
+
+    def test_sql_reference_counts_ignore_blank_ids(self):
+        self.ns["connection"] = MagicMock()
+        cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [(None,), ("",), ("peer",)]
+        for method, args in ((self.merge._count_source_references, ("base",)),
+                             (self.merge._count_source_references_excluded_tiles, ("base", ["tile"])),
+                             (self.merge._count_source_references_tile, ("tile",))):
+            with self.subTest(method=method.__name__):
+                self.assertEqual(method(*args), (1, ["peer"]))
 
     def test_nullable_concepts_have_preview_execution_parity(self):
         for base_value, source_value, expected in [

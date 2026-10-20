@@ -433,7 +433,7 @@
                         <td class="mono" data-bind="attr: { rowspan: resourceRowspan }">
                         <!-- ko if: resourceId -->
                         <a target="_blank" rel="noopener"
-                            data-bind="text: resourceId, attr: { href: '/report/' + resourceId }"></a>
+                            data-bind="text: $component.getResourceDisplay(resourceId), attr: { href: '/report/' + resourceId }"></a>
                         <!-- /ko -->
                         <!-- ko ifnot: resourceId -->—<!-- /ko -->
                         </td>
@@ -1415,7 +1415,7 @@
                         <td class="mono" data-bind="attr: { rowspan: resourceRowspan }">
                             <!-- ko if: resourceId -->
                             <a target="_blank"
-                            data-bind="text: resourceId, attr: { href: '/report/' + resourceId }"></a>
+                            data-bind="text: $component.getResourceDisplay(resourceId), attr: { href: '/report/' + resourceId }"></a>
                             <!-- /ko -->
                             <!-- ko ifnot: resourceId -->—<!-- /ko -->
                         </td>

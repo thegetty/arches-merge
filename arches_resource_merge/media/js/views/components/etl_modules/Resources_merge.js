@@ -379,6 +379,10 @@ const ViewModel = function (params) {
                     return (
                         tile.tileId.toLowerCase().includes(filterText) ||
                         tile.resourceId.toLowerCase().includes(filterText) ||
+                        self
+                            .getResourceDisplay(tile.resourceId)
+                            .toLowerCase()
+                            .includes(filterText) ||
                         (tile.tiledata ?? []).some(
                             (td) =>
                                 td &&
@@ -462,9 +466,7 @@ const ViewModel = function (params) {
 
                       return {
                           tileId,
-                          resourceId: resourceId
-                              ? self.resourceDisplayMap()[resourceId]
-                              : undefined,
+                          resourceId,
                           status,
                           branch_name: tile?.branch_name || "",
                           tiledata: tile?.tiledata,

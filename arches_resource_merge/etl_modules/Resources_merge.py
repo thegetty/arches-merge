@@ -27,6 +27,7 @@ from arches.app.search.search_engine_factory import SearchEngineInstance as se
 from arches.app.search.mappings import RESOURCES_INDEX, TERMS_INDEX
 from django.contrib.auth.models import AbstractUser, AnonymousUser
 from django.core import serializers
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
 from django.db.models import Model
 from arches.app.models import models
@@ -98,6 +99,13 @@ def _list_values(value: Any) -> list[Any]:
     return value if isinstance(value, list) else [value]
 
 
+def _resource_references(value: Any) -> list[dict]:
+    return [
+        item for item in _list_values(value)
+        if isinstance(item, dict) and item.get("resourceId")
+    ]
+
+
 def log_event_details(loadid: str | None, message: str):
     if not loadid:
         return
@@ -108,6 +116,14 @@ def log_event_details(loadid: str | None, message: str):
         event.load_description = ""
     event.load_description += message
     event.save()
+
+
+class SnapshotJSONEncoder(DjangoJSONEncoder):
+    def default(self, value):
+        # Undo snapshots must retain the database's full datetime precision.
+        if isinstance(value, datetime):
+            return value.isoformat().replace("+00:00", "Z")
+        return super().default(value)
 
 
 class Resourcesmerge(BaseBulkEditor):
@@ -130,7 +146,7 @@ class Resourcesmerge(BaseBulkEditor):
         self._uri_tile_replacements: dict[str, Tile] = {}
 
     def _serialize_obj(self, obj: Model) -> str:
-        return serializers.serialize("json", [obj])
+        return serializers.serialize("json", [obj], cls=SnapshotJSONEncoder)
 
     def _tile_delete(self, tile: Tile):
         tile.save_edit(
@@ -1421,9 +1437,10 @@ class Resourcesmerge(BaseBulkEditor):
     def get_display_values_source_reference(
         self, tile: Tile, node: Node, datatype, added_reference_tileid=None
     ):
-        data = datatype.get_tile_data(tile)
-        if data:
-            nodevalue = datatype.get_nodevalues(data[str(node.nodeid)])
+        data = datatype.get_tile_data(tile) or {}
+        value = data.get(str(node.nodeid))
+        if value is not None:
+            nodevalue = _resource_references(datatype.get_nodevalues(value))
 
             items = []
             for resourceXresource in nodevalue:
@@ -1443,6 +1460,7 @@ class Resourcesmerge(BaseBulkEditor):
                 except Resource.DoesNotExist:
                     continue
             return items
+        return []
 
     def _get_widget_label(self, node, nod):
         widget_label = ""
@@ -1695,13 +1713,17 @@ class Resourcesmerge(BaseBulkEditor):
             if card_name not in dict_counts:
                 dict_counts[card_name] = {}
                 if node_group_id == source_references_id:
-                    for tile_data in tile.data.get(source_references_id, []):
+                    for tile_data in _resource_references(
+                        self._get_tile_data(tile).get(source_references_id)
+                    ):
                         unique_reference_resources.add(tile_data.get("resourceId"))
                 else:
                     dict_counts[card_name][str(base_resource) + "_pre"] = 1
             else:
                 if node_group_id == source_references_id:
-                    for tile_data in tile.data.get(source_references_id, []):
+                    for tile_data in _resource_references(
+                        self._get_tile_data(tile).get(source_references_id)
+                    ):
                         unique_reference_resources.add(tile_data.get("resourceId"))
                 else:
                     dict_counts[card_name][str(base_resource) + "_pre"] += 1
@@ -1758,9 +1780,12 @@ class Resourcesmerge(BaseBulkEditor):
                     str(tile.tileid) in added
                     and str(tile.tileid) not in excluded_tile_ids
                 ):
-                    if len(tile.data.get(source_references_id, [])) > 0:
+                    references = _resource_references(
+                        self._get_tile_data(tile).get(source_references_id)
+                    )
+                    if references:
                         count_added = 0
-                        for tile_data in tile.data.get(source_references_id, []):
+                        for tile_data in references:
                             if tile_data.get("resourceId") in added_reference_tileid:
                                 count_added += 1
                         if count_added == 0:
@@ -3026,7 +3051,7 @@ class Resourcesmerge(BaseBulkEditor):
             rows = cursor.fetchall()
 
             # Extract only related_resource_id column (index 1)
-            related_ids = [row[0] for row in rows]
+            related_ids = [row[0] for row in rows if row[0]]
 
             return len(related_ids), related_ids
 
@@ -3066,7 +3091,7 @@ class Resourcesmerge(BaseBulkEditor):
             cursor.execute(query, params)
 
             rows = cursor.fetchall()
-            related_ids = [row[0] for row in rows]
+            related_ids = [row[0] for row in rows if row[0]]
 
             return len(related_ids), related_ids
 
@@ -3088,7 +3113,7 @@ class Resourcesmerge(BaseBulkEditor):
             rows = cursor.fetchall()
 
             # Extract only related_resource_id column (index 1)
-            related_ids = [row[0] for row in rows]
+            related_ids = [row[0] for row in rows if row[0]]
 
             return len(set(related_ids)), list(set(related_ids))
 
