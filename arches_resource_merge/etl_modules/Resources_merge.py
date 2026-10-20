@@ -23,7 +23,8 @@ from arches.app.models.models import (
 from arches.app.models.resource import Resource
 from arches.app.models.tile import Tile
 from arches.app.utils.decorators import user_created_transaction_match
-from arches.app.utils.index_database import index_resources_by_transaction
+from arches.app.search.search_engine_factory import SearchEngineInstance as se
+from arches.app.search.mappings import RESOURCES_INDEX, TERMS_INDEX
 from django.contrib.auth.models import AbstractUser, AnonymousUser
 from django.core import serializers
 from django.db import connection, transaction
@@ -510,6 +511,31 @@ class Resourcesmerge(BaseBulkEditor):
         logger.warning(response)
         return response
 
+    def _refresh_resource_indexes(self, loadid: str):
+        changes = list(EditLog.objects.filter(transactionid=loadid))
+        resource_ids = {
+            str(change.resourceinstanceid)
+            for change in changes
+            if change.resourceinstanceid
+        }
+        # Older resource-delete logs have no resourceinstanceid column value.
+        for change in changes:
+            if change.edittype == "delete":
+                resource_ids.update(
+                    str(resource.pk)
+                    for resource in self._deserialize_models(change.oldvalue)
+                )
+        if not resource_ids:
+            return
+
+        for resource_id in sorted(resource_ids):
+            Resource().delete_index(resourceinstanceid=resource_id)
+        for resource in Resource.objects.filter(pk__in=resource_ids):
+            resource.load_tiles()
+            resource.save_descriptors()
+            resource.index()
+        se.refresh(index=f"{RESOURCES_INDEX},{TERMS_INDEX}")
+
     def reverse_load(self, loadid: str):
         with connection.cursor() as cursor:
             cursor.execute(
@@ -517,6 +543,11 @@ class Resourcesmerge(BaseBulkEditor):
                 ("reversing", loadid),
             )
             resources_changed_count = self.reverse_edit_log_entries(loadid)
+            cursor.execute(
+                """UPDATE load_event SET status = %s WHERE loadid = %s""",
+                ("unindexed", loadid),
+            )
+            self._refresh_resource_indexes(loadid)
             cursor.execute(
                 """UPDATE load_event SET status = %s, load_details = load_details::jsonb || ('{"resources_removed":' || %s || '}')::jsonb WHERE loadid = %s""",
                 ("unloaded", resources_changed_count, loadid),
@@ -3251,7 +3282,6 @@ class Resourcesmerge(BaseBulkEditor):
         event.taskid = edit_task.task_id
         event.save()
 
-    @transaction.atomic
     def run_load_task(
         self,
         userid: str,
@@ -3266,6 +3296,7 @@ class Resourcesmerge(BaseBulkEditor):
 
         if excluded_tile_ids is None:
             excluded_tile_ids = []
+        database_merged = False
         try:
             with transaction.atomic():
                 logger.warning(
@@ -3486,15 +3517,6 @@ class Resourcesmerge(BaseBulkEditor):
 
                 log_event_details(loadid, "|Done, Indexing...")
                 logger.warning("Done, indexing...")
-                index_resources_by_transaction(
-                    loadid,
-                    quiet=True,
-                    use_multiprocessing=False,
-                    recalculate_descriptors=True,
-                )
-
-                logger.warning("Merge Resources completed")
-                log_event_details(loadid, "|Done")
                 change_summary = self._build_change_summary(base_resource)
 
                 # Add merge counts to the summary
@@ -3517,17 +3539,27 @@ class Resourcesmerge(BaseBulkEditor):
                     load_details["dictCounts"] = dict_counts_normalized
                     load_details["userNameMerge"] = self.user.username
                     event.load_details = load_details
-                event.status = "indexed"
-                event.indexed_time = datetime.now()
+                event.status = "unindexed"
+                event.indexed_time = None
                 event.complete = True
-                event.successful = True
+                event.successful = False
                 event.save()
-                return {"success": True, "data": "done"}
+            database_merged = True
+            self._refresh_resource_indexes(loadid)
+            log_event_details(loadid, "|Done")
+            event.status = "indexed"
+            event.indexed_time = datetime.now()
+            event.successful = True
+            event.save()
+            logger.warning("Merge Resources completed")
+            return {"success": True, "data": "done"}
         except Exception as e:
             logger.exception("Exception occurred")
 
             event = LoadEvent.objects.get(loadid=loadid)
-            event.status = "failed"
+            event.status = "unindexed" if database_merged else "failed"
+            event.successful = False
+            event.error_message = str(e)
             event.load_end_time = datetime.now()
             event.save()
 

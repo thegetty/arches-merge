@@ -484,5 +484,148 @@ class UriMergeTests(unittest.TestCase):
         self.merge.reverse_edit_log_entries("test-load")
         self.assertEqual(self.snapshot(), baseline)
 
+class IndexLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import datetime
+        from contextlib import contextmanager
+        self.ns = load_merge_methods()
+        self.merge = self.ns["Resourcesmerge"].__new__(self.ns["Resourcesmerge"])
+        self.merge.loadid = "test-load"
+        self.merge.user = SimpleNamespace(username="tester")
+        self.calls = []
+        self.resources = {}
+        self.deleter = Mock()
+        self.deleter.delete_index.side_effect = lambda **kw: self.calls.append(("delete", kw["resourceinstanceid"]))
+        for rid in ("base", "peer", "source"):
+            resource = Mock()
+            resource.load_tiles.side_effect = lambda rid=rid: self.calls.append(("tiles", rid))
+            resource.save_descriptors.side_effect = lambda rid=rid: self.calls.append(("descriptors", rid))
+            resource.index.side_effect = lambda rid=rid: self.calls.append(("index", rid))
+            self.resources[rid] = resource
+        self.resource_model = Mock(return_value=self.deleter)
+        self.resource_model.objects.get.side_effect = lambda **kw: self.resources[kw["pk"]]
+        self.resource_model.objects.filter.side_effect = lambda **kw: [self.resources[rid] for rid in sorted(kw["pk__in"]) if rid in self.resources]
+        self.ns.update(Resource=self.resource_model, connection=MagicMock(), transaction=MagicMock(),
+                       logger=Mock(), datetime=datetime, RXR_TO_FIELD="resourceinstanceidto",
+                       index_resources_by_transaction=Mock(), se=Mock(),
+                       RESOURCES_INDEX="resources", TERMS_INDEX="terms", log_event_details=Mock())
+        self.atomic_depth = 0
+        @contextmanager
+        def atomic():
+            self.atomic_depth += 1
+            try:
+                yield
+            finally:
+                self.atomic_depth -= 1
+        self.ns["transaction"].atomic.side_effect = atomic
+        self.ns["se"].refresh.side_effect = lambda **kw: self.calls.append(("refresh", kw["index"]))
+        self.logs = [SimpleNamespace(resourceinstanceid="base", edittype="tile edit"),
+                     SimpleNamespace(resourceinstanceid="peer", edittype="tile edit"),
+                     SimpleNamespace(resourceinstanceid=None, edittype="delete", oldvalue="source snapshot")]
+        self.ns["EditLog"] = SimpleNamespace(objects=SimpleNamespace(filter=Mock(return_value=self.logs)))
+        self.merge._deserialize_models = Mock(return_value=[SimpleNamespace(pk="source")])
+        self.merge.reverse_edit_log_entries = Mock(side_effect=lambda loadid: self.calls.append(("restore", loadid)) or 7)
+
+    def prepare_merge(self):
+        self.resources.pop("source")
+        self.ns["Tile"] = SimpleNamespace(objects=SimpleNamespace(filter=lambda **kw: []))
+        self.ns["ResourceXResource"] = SimpleNamespace(objects=SimpleNamespace(filter=lambda **kw: []))
+        self.ns["GeoJSONGeometry"] = Mock()
+        self.event = SimpleNamespace(status="running", load_details={}, successful=None,
+                                     save=Mock(), refresh_from_db=Mock())
+        self.ns["LoadEvent"] = SimpleNamespace(objects=SimpleNamespace(get=lambda **kw: self.event))
+        self.merge._get_tiles_info = Mock(return_value=([], "0"))
+        self.merge._count_related_resources = Mock(return_value=(0, []))
+        self.merge._count_source_references = Mock(return_value=(0, []))
+        self.merge._count_source_references_excluded_tiles = Mock(return_value=(0, []))
+        self.merge.calculate_number_of_tiles_per_nodegroup_baseresource = Mock(return_value=({}, None))
+        self.merge.build_dict_merge_resources_tiles_per_nodegroup = Mock(return_value=({}, {}, None))
+        self.merge.calculate_number_added_deleted_merge_resource = Mock(return_value={})
+        self.merge._process_merge_resource = Mock()
+        self.merge._resource_delete = Mock()
+        self.merge.get_tiles_value = Mock()
+        self.merge.update_tile_status = Mock(return_value=[])
+        self.merge._build_change_summary = Mock(return_value={})
+        self.resource_model.objects.get.side_effect = None
+
+    def test_merge_removes_deleted_source_document_and_terms_before_success(self):
+        self.prepare_merge()
+        result = self.merge.run_load_task("user", "test-load", "base", ["source"])
+        self.assertTrue(result["success"])
+        self.deleter.delete_index.assert_any_call(resourceinstanceid="source")
+        self.assertNotIn(("index", "source"), self.calls)
+        self.assertEqual(self.calls[-1], ("refresh", "resources,terms"))
+        self.assertEqual(self.event.status, "indexed")
+        self.resource_model.objects.filter.assert_called_once_with(pk__in={"base", "peer", "source"})
+
+    def test_undo_reindexes_restored_empty_source_and_related_owner(self):
+        self.merge.reverse_load("test-load")
+        self.assertEqual(self.calls[0], ("restore", "test-load"))
+        self.assertEqual({rid for operation, rid in self.calls if operation == "delete"}, {"base", "source", "peer"})
+        self.assertEqual({rid for operation, rid in self.calls if operation == "index"}, {"base", "source", "peer"})
+        self.assertEqual(self.calls[-1], ("refresh", "resources,terms"))
+        last_delete = max(i for i, call in enumerate(self.calls) if call[0] == "delete")
+        first_index = min(i for i, call in enumerate(self.calls) if call[0] == "index")
+        self.assertLess(last_delete, first_index)
+        for resource in self.resources.values():
+            resource.load_tiles.assert_called_once()
+            resource.save_descriptors.assert_called_once()
+            resource.index.assert_called_once()
+        self.merge._deserialize_models.assert_called_once_with("source snapshot")
+
+    def test_undo_index_failure_does_not_report_unloaded(self):
+        self.resources["peer"].index.side_effect = RuntimeError("index unavailable")
+        with self.assertRaisesRegex(RuntimeError, "index unavailable"):
+            self.merge.reverse_load("test-load")
+        cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
+        statuses = [call.args[1][0] for call in cursor.execute.call_args_list]
+        self.assertIn("unindexed", statuses)
+        self.assertNotIn("unloaded", statuses)
+
+    def test_merge_index_failure_does_not_report_success(self):
+        self.prepare_merge()
+        self.deleter.delete_index.side_effect = RuntimeError("index unavailable")
+        result = self.merge.run_load_task("user", "test-load", "base", ["source"])
+        self.assertFalse(result["success"])
+        self.assertEqual(self.event.status, "unindexed")
+        self.assertIsNot(self.event.successful, True)
+
+    def test_merge_rebuild_runs_after_database_transaction(self):
+        self.prepare_merge()
+        depths = []
+        self.deleter.delete_index.side_effect = lambda **kw: depths.append(self.atomic_depth)
+        self.resources["peer"].index.side_effect = RuntimeError("index unavailable")
+        result = self.merge.run_load_task("user", "test-load", "base", ["source"])
+        self.assertFalse(result["success"])
+        self.assertEqual(depths, [0, 0, 0])
+        self.assertEqual(self.event.status, "unindexed")
+        self.assertTrue(self.event.complete)
+
+    def test_empty_load_does_not_touch_any_index(self):
+        self.ns["EditLog"].objects.filter.return_value = []
+        self.merge._refresh_resource_indexes("empty-load")
+        self.resource_model.assert_not_called()
+        self.resource_model.objects.filter.assert_not_called()
+        self.ns["se"].refresh.assert_not_called()
+
+    def test_merge_database_failure_does_not_start_index_cleanup(self):
+        self.prepare_merge()
+        self.merge._process_merge_resource.side_effect = RuntimeError("invalid merge data")
+        result = self.merge.run_load_task("user", "test-load", "base", ["source"])
+        self.assertFalse(result["success"])
+        self.assertEqual(self.event.status, "failed")
+        self.deleter.delete_index.assert_not_called()
+        self.ns["se"].refresh.assert_not_called()
+
+    def test_refresh_failure_does_not_report_unloaded(self):
+        self.ns["se"].refresh.side_effect = RuntimeError("refresh unavailable")
+        with self.assertRaisesRegex(RuntimeError, "refresh unavailable"):
+            self.merge.reverse_load("test-load")
+        cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
+        statuses = [call.args[1][0] for call in cursor.execute.call_args_list]
+        self.assertEqual(statuses[-1], "unindexed")
+        self.assertNotIn("unloaded", statuses)
+
+
 if __name__ == "__main__":
     unittest.main()
