@@ -5,8 +5,8 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const root = path.join(__dirname, '..', 'arches_resource_merge');
-const source = fs.readFileSync(path.join(root, 'media/js/views/components/etl_modules/Resources_merge.js'), 'utf8');
-const template = fs.readFileSync(path.join(root, 'templates/views/components/etl_modules/Resources_merge.htm'), 'utf8');
+const source = fs.readFileSync(path.join(root, 'media/js/views/components/etl_modules/arches-resource-merge.js'), 'utf8');
+const template = fs.readFileSync(path.join(root, 'templates/views/components/etl_modules/arches-resource-merge.htm'), 'utf8');
 const start = source.indexOf('const normalizeMergeableGroups =');
 const end = source.indexOf('\n    };', start) + '\n    };'.length;
 const id = '32170ffb-7d7e-45b4-bc06-8eef0cd4d4e1';
@@ -83,4 +83,21 @@ test('preview CSV resource column exports UUID identity', async () => {
     });
     self.downloadPreviewCSV();
     assert.ok((await blob.text()).includes(`"References","Add","tile","${id}",`));
+});
+
+test('new plugin component registers independently of an already loaded host merge component', () => {
+    const oldComponent = {legacy: true};
+    const registered = {Resources_merge: oldComponent};
+    const ko = {components: {register(name, config) {
+        assert.equal(registered[name], undefined, 'duplicate component registration');
+        registered[name] = config;
+    }}};
+    const executable = source.replace(/^import .*;\r?$/gm, '')
+        .replace('export const ViewModel', 'const ViewModel')
+        .replace('export default ', '');
+    vm.runInNewContext(executable, {ko, baseStringEditorTemplate: 'plugin-template'});
+    assert.equal(registered.Resources_merge, oldComponent);
+    assert.equal(registered['arches-resource-merge'].template, 'plugin-template');
+    assert.equal(typeof registered['arches-resource-merge'].viewModel, 'function');
+    assert.ok(source.includes('templates/views/components/etl_modules/arches-resource-merge.htm'));
 });
