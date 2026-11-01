@@ -29,7 +29,7 @@ def load_merge_methods():
     module = ast.parse("from __future__ import annotations\nimport json")
     module.body.extend(body)
     namespace = {"RXR_FROM_FIELD": "resourceinstanceidfrom", "RXR_TILE_FIELD": "tileid",
-                 "DjangoJSONEncoder": json.JSONEncoder, "datetime": datetime}
+                 "DjangoJSONEncoder": json.JSONEncoder, "datetime": datetime, "transaction": MagicMock()}
     exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
     return namespace
 
@@ -235,7 +235,7 @@ class UriMergeTests(unittest.TestCase):
         self.ns["Resource"] = SimpleNamespace(objects=SimpleNamespace(get=lambda **kw: kw["pk"]))
         self.ns["NodeGroup"] = SimpleNamespace(objects=SimpleNamespace(
             get=lambda **kw: SimpleNamespace(nodegroupid=kw["nodegroupid"], cardinality="n")))
-        self.merge.get_node = lambda key: SimpleNamespace(datatype="url" if key == "uri" else "string")
+        self.merge.get_node = lambda key: SimpleNamespace(name=key, datatype="url" if key == "uri" else "string")
         self.ns["Tile"] = SimpleNamespace(objects=SimpleNamespace(filter=self.filter_tiles, get=self.get_tile))
         self.ns["ResourceXResource"] = SimpleNamespace(objects=SimpleNamespace(filter=self.filter_relations))
         self.merge._tile_save = lambda tile: self.save("tile", tile.tileid, tile)
@@ -245,6 +245,8 @@ class UriMergeTests(unittest.TestCase):
         self.ns["connection"] = MagicMock()
         self.ns["connection"].cursor.return_value.__enter__.return_value.fetchall.return_value = [("url",)]
         self.ns["serializers"] = SimpleNamespace(deserialize=self.deserialize)
+        # Tuple snapshots stand in for Django serialization in this fixture.
+        self.merge._reverse_snapshot = lambda log, obj=None: log.oldvalue
         changes = MagicMock()
         changes.order_by.return_value.all.side_effect = lambda: list(reversed(self.logs))
         self.ns["EditLog"] = SimpleNamespace(objects=SimpleNamespace(filter=lambda **kw: changes))
@@ -297,7 +299,7 @@ class UriMergeTests(unittest.TestCase):
     def deserialize(self, fmt, payload):
         kind, key, obj = payload
         store = self.tiles if kind == "tile" else self.relations
-        return [SimpleNamespace(save=lambda: store.update({key: copy.deepcopy(obj)}))]
+        return [SimpleNamespace(object=obj, save=lambda: store.update({key: copy.deepcopy(obj)}))]
 
     def snapshot(self):
         return ({key: {"data": copy.deepcopy(t.data), "owner": t.resourceinstance,
@@ -600,6 +602,9 @@ class IndexLifecycleTests(unittest.TestCase):
 
     def prepare_merge(self):
         self.resources.pop("source")
+        self.merge._validate_incoming_references = Mock()
+        self.ns["models"] = SimpleNamespace(TileModel=SimpleNamespace(objects=Mock()))
+        self.ns["models"].TileModel.objects.filter.return_value.values_list.return_value = []
         self.ns["Tile"] = SimpleNamespace(objects=SimpleNamespace(filter=lambda **kw: []))
         self.ns["ResourceXResource"] = SimpleNamespace(objects=SimpleNamespace(filter=lambda **kw: []))
         self.ns["GeoJSONGeometry"] = Mock()
