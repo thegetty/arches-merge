@@ -74,10 +74,11 @@ wheels = [
 
 [[package]]
 name = "arches-resource-merge"
-version = "0.0.1"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "arches" },
+    { name = "packaging" },
 ]
 
 [package.optional-dependencies]
@@ -92,11 +93,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "arches", specifier = ">=7.6.17,<7.7.0" },
+    { name = "arches", specifier = ">=7.6.17,<8.3.0" },
     { name = "black", marker = "extra == 'dev'", specifier = "==24.4.2" },
     { name = "coverage", marker = "extra == 'dev'" },
     { name = "django-silk", marker = "extra == 'dev'", specifier = "==5.1.0" },
     { name = "livereload", marker = "extra == 'dev'" },
+    { name = "packaging", specifier = "==26.2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = "==3.8.0" },
     { name = "sst", marker = "extra == 'dev'" },
 ]
