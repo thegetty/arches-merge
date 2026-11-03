@@ -23,9 +23,12 @@ from arches.app.models.models import (
 from arches.app.models.resource import Resource
 from arches.app.models.tile import Tile
 from arches.app.utils.decorators import user_created_transaction_match
-from arches.app.utils.index_database import index_resources_by_transaction
+from arches.app.search.search_engine_factory import SearchEngineInstance as se
+from arches.app.search.mappings import RESOURCES_INDEX, TERMS_INDEX
 from django.contrib.auth.models import AbstractUser, AnonymousUser
+from django.apps import apps
 from django.core import serializers
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
 from django.db.models import Model
 from arches.app.models import models
@@ -44,8 +47,8 @@ details = {
     "name": "Merge Resources",
     "description": "Merge two or more resources into one resource",
     "etl_type": "edit",
-    "component": "views/components/etl_modules/Resources_merge",
-    "componentname": "Resources_merge",
+    "component": "views/components/etl_modules/arches-resource-merge",
+    "componentname": "arches-resource-merge",
     "modulename": "Resources_merge.py",
     "classname": "Resourcesmerge",
     "config": {"bgColor": "#f5c60a", "circleColor": "#f9dd6c"},
@@ -91,6 +94,19 @@ class MissingRequiredInputError(Exception):
     pass
 
 
+def _list_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _resource_references(value: Any) -> list[dict]:
+    return [
+        item for item in _list_values(value)
+        if isinstance(item, dict) and item.get("resourceId")
+    ]
+
+
 def log_event_details(loadid: str | None, message: str):
     if not loadid:
         return
@@ -101,6 +117,14 @@ def log_event_details(loadid: str | None, message: str):
         event.load_description = ""
     event.load_description += message
     event.save()
+
+
+class SnapshotJSONEncoder(DjangoJSONEncoder):
+    def default(self, value):
+        # Undo snapshots must retain the database's full datetime precision.
+        if isinstance(value, datetime):
+            return value.isoformat().replace("+00:00", "Z")
+        return super().default(value)
 
 
 class Resourcesmerge(BaseBulkEditor):
@@ -120,9 +144,10 @@ class Resourcesmerge(BaseBulkEditor):
         self.user = request.user if request else None
         self.datatype_factory = DataTypeFactory()
         self.node_lookup = {}
+        self._uri_tile_replacements: dict[str, Tile] = {}
 
     def _serialize_obj(self, obj: Model) -> str:
-        return serializers.serialize("json", [obj])
+        return serializers.serialize("json", [obj], cls=SnapshotJSONEncoder)
 
     def _tile_delete(self, tile: Tile):
         tile.save_edit(
@@ -134,11 +159,14 @@ class Resourcesmerge(BaseBulkEditor):
         _ = super(Tile, tile).delete()
 
     def _tile_save(self, tile: Tile):
-        old_tile = Tile.objects.get(pk=tile.tileid)
+        old_tile = models.TileModel.objects.get(pk=tile.tileid)
+        old_value = json.loads(self._serialize_obj(old_tile))
+        # Keep the existing proxy model label for native undo compatibility.
+        old_value[0]["model"] = Tile._meta.label_lower
         tile.save_edit(
             user=self.user,
             new_value=self._serialize_obj(tile),
-            old_value=self._serialize_obj(old_tile),
+            old_value=json.dumps(old_value),
             edit_type="tile edit",
             transaction_id=self.loadid,
         )
@@ -218,7 +246,12 @@ class Resourcesmerge(BaseBulkEditor):
 
         models_list: list[Model] = []
         try:
-            for obj in serializers.deserialize("json", serialized):
+            records = json.loads(serialized)
+            for record in records:
+                # These callers only read fields; restoration still uses the saved label.
+                if record.get("model") == "models.tile":
+                    record["model"] = "models.tilemodel"
+            for obj in serializers.deserialize("json", json.dumps(records)):
                 models_list.append(obj.object)
         except Exception:
             return []
@@ -503,17 +536,128 @@ class Resourcesmerge(BaseBulkEditor):
         logger.warning(response)
         return response
 
+    def _refresh_resource_indexes(self, loadid: str):
+        changes = list(EditLog.objects.filter(transactionid=loadid))
+        resource_ids = {
+            str(change.resourceinstanceid)
+            for change in changes
+            if change.resourceinstanceid
+        }
+        # Older resource-delete logs have no resourceinstanceid column value.
+        for change in changes:
+            if change.edittype == "delete":
+                resource_ids.update(
+                    str(resource.pk)
+                    for resource in self._deserialize_models(change.oldvalue)
+                )
+        if not resource_ids:
+            return
+
+        for resource_id in sorted(resource_ids):
+            Resource().delete_index(resourceinstanceid=resource_id)
+        for resource in Resource.objects.filter(pk__in=resource_ids):
+            resource.load_tiles()
+            resource.save_descriptors()
+            resource.index()
+        se.refresh(index=f"{RESOURCES_INDEX},{TERMS_INDEX}")
+
     def reverse_load(self, loadid: str):
-        with connection.cursor() as cursor:
+        with transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(
                 """UPDATE load_event SET status = %s WHERE loadid = %s""",
                 ("reversing", loadid),
             )
             resources_changed_count = self.reverse_edit_log_entries(loadid)
             cursor.execute(
+                """UPDATE load_event SET status = %s WHERE loadid = %s""",
+                ("unindexed", loadid),
+            )
+        self._refresh_resource_indexes(loadid)
+        with connection.cursor() as cursor:
+            cursor.execute(
                 """UPDATE load_event SET status = %s, load_details = load_details::jsonb || ('{"resources_removed":' || %s || '}')::jsonb WHERE loadid = %s""",
                 ("unloaded", resources_changed_count, loadid),
             )
+
+    @staticmethod
+    def _reverse_snapshot_value(before, after, current):
+        from copy import deepcopy
+
+        conflict = "Cannot unload merge: a value changed after this merge; review later edits"
+        if before == after or current == before:
+            return deepcopy(current)
+        if current == after:
+            return deepcopy(before)
+        if all(isinstance(value, dict) for value in (before, after, current)):
+            result = deepcopy(current)
+            missing = object()
+            for key in before.keys() | after.keys():
+                old, new, now = (value.get(key, missing) for value in (before, after, current))
+                if old == new:
+                    continue
+                if old is missing:
+                    if now is not missing and now != new:
+                        raise ValueError(conflict)
+                    result.pop(key, None)
+                elif new is missing:
+                    if now is not missing and now is not None and now != old:
+                        raise ValueError(conflict)
+                    result[key] = deepcopy(old)
+                else:
+                    if now is missing:
+                        # Arches logs cleared tile keys as null but saves them absent.
+                        if new is not None:
+                            raise ValueError(conflict)
+                        now = None
+                    result[key] = Resourcesmerge._reverse_snapshot_value(old, new, now)
+            return result
+        if all(isinstance(value, list) for value in (before, after, current)):
+            maps = []
+            for values in (before, after, current):
+                if any(not isinstance(v, dict) or not v.get("resourceXresourceId") for v in values):
+                    raise ValueError(conflict)
+                indexed = {v["resourceXresourceId"]: v for v in values}
+                if len(indexed) != len(values):
+                    raise ValueError(conflict)
+                maps.append(indexed)
+            old, new, now = maps
+            # Stable relationship IDs distinguish independent edits in the same list.
+            if list(old) != list(new):
+                raise ValueError(conflict)
+            if any(key not in now and old[key] != new[key] for key in old):
+                raise ValueError(conflict)
+            return [Resourcesmerge._reverse_snapshot_value(old[v["resourceXresourceId"]], new[v["resourceXresourceId"]], v)
+                    if v["resourceXresourceId"] in old else deepcopy(v) for v in current]
+        raise ValueError(conflict)
+
+    def _reverse_snapshot(self, edit_log, original=None):
+        before = json.loads(edit_log.oldvalue)
+        if not before and original is None:
+            return None
+        if len(before) != 1 or not before[0].get("pk") or (
+            original is not None and str(before[0]["pk"]) != str(original.pk)
+        ):
+            raise ValueError("Cannot unload merge: inconsistent edit snapshots")
+        model = original.__class__ if original is not None else apps.get_model(before[0]["model"])._meta.concrete_model
+        current = model.objects.select_for_update().filter(pk=before[0]["pk"]).first()
+        record = json.loads(self._serialize_obj(current))[0] if current is not None else None
+        if edit_log.edittype in ("delete", "tile delete", "resourcexresource delete"):
+            if record is not None and record["fields"] != before[0]["fields"]:
+                raise ValueError("Cannot unload merge: a deleted object changed after this merge; review later edits")
+            return edit_log.oldvalue
+        if not edit_log.newvalue or current is None:
+            raise ValueError("Cannot unload merge: missing post-merge snapshot or edited object; review edit history")
+        after = json.loads(edit_log.newvalue)
+        if len(after) != 1 or any(before[0][key] != after[0][key] for key in ("model", "pk")):
+            raise ValueError("Cannot unload merge: inconsistent edit snapshots")
+        original_fields = before[0]["fields"]
+        before[0]["fields"] = self._reverse_snapshot_value(original_fields, after[0]["fields"], record["fields"])
+        automatic = {"modified"} if edit_log.edittype == "resourcexresource edit" else set()
+        if automatic and {k: v for k, v in record["fields"].items() if k not in automatic} == {k: v for k, v in after[0]["fields"].items() if k not in automatic}:
+            # Save-time timestamps are assigned after the edit snapshot is recorded.
+            for key in automatic & original_fields.keys():
+                before[0]["fields"][key] = original_fields[key]
+        return json.dumps(before)
 
     @transaction.atomic()
     def reverse_edit_log_entries(self, transaction_id: str):
@@ -533,14 +677,49 @@ class Resourcesmerge(BaseBulkEditor):
             ):
                 continue
 
-            for obj in serializers.deserialize("json", edit_log.oldvalue):
-                obj.save()
-                number_of_db_changes += 1
+            snapshot = self._reverse_snapshot(edit_log)
+            if snapshot is None:
+                continue
+            for restored in serializers.deserialize("json", snapshot):
+                restored.save()
+            number_of_db_changes += 1
 
         return number_of_db_changes
 
     def _get_tile_data(self, tile: Tile) -> dict[str, Any]:
         return tile.data or {}
+
+    def _validate_incoming_references(self, base_resource: str, merge_resources: list[str]):
+        sources = set(map(str, merge_resources))
+        incoming = ResourceXResource.objects.filter(
+            **{f"{RXR_TO_FIELD}__in": [base_resource, *merge_resources]}
+        )
+        rows = {
+            str(row[0]): tuple(map(str, row[1:]))
+            for row in incoming.values_list(
+                "pk", RXR_TILE_FIELD, RXR_FROM_FIELD, RXR_TO_FIELD, RXR_NODE_FIELD
+            )
+        }
+        # Shared incoming tiles can contain unbacked references to another source.
+        tiles = models.TileModel.objects.filter(
+            tileid__in=incoming.values_list(RXR_TILE_FIELD, flat=True)
+        )
+        seen = set()
+        for tile in tiles.iterator(chunk_size=200):
+            while tile is not None and str(tile.tileid) not in seen:
+                seen.add(str(tile.tileid))
+                for nodeid, value in self._get_tile_data(tile).items():
+                    for reference in _resource_references(value):
+                        target = str(reference["resourceId"])
+                        if target not in sources:
+                            continue
+                        expected = (str(tile.tileid), str(tile.resourceinstance_id), target, str(nodeid))
+                        if rows.get(str(reference.get("resourceXresourceId"))) != expected:
+                            raise ValueError(
+                                f"Cannot merge: reference in tile {tile.tileid} has a missing or "
+                                "inconsistent relationship row. Repair the reference before merging."
+                            )
+                tile = tile.parenttile if tile.parenttile_id and str(tile.parenttile_id) not in seen else None
 
     def _get_preview_node_order(self, nodegroup: NodeGroup) -> list[str]:
         nodegroup_key = str(nodegroup.nodegroupid)
@@ -725,17 +904,13 @@ class Resourcesmerge(BaseBulkEditor):
         return key_of_string_value
 
     def all_list_reference(self, keys: list[str], base: Tile) -> list[str]:
-        listReference: list[str] = []
-
         info = self._get_tile_data(base)
-        for key in keys:
-            if info[key] is None:
-                continue
-            if isinstance(info[key], list):
-                for infoTiledata in info[key]:
-                    if "resourceId" in infoTiledata:
-                        listReference.append(infoTiledata["resourceId"])
-        return listReference
+        return [
+            item["resourceId"]
+            for key in keys
+            for item in _list_values(info.get(key))
+            if isinstance(item, dict) and "resourceId" in item
+        ]
 
     def check_for_same_information_preview(
         self,
@@ -771,6 +946,9 @@ class Resourcesmerge(BaseBulkEditor):
         if len(matching_tiles) == 1 and not flag_label:
             base = matching_tiles[0]
             mergeBaseResource = self._get_tile_data(base)
+            for key in keys:
+                if isinstance(info.get(key), list) and info[key]:
+                    mergeBaseResource[key] = _list_values(mergeBaseResource.get(key))
             listReference = self.all_list_reference(keys, base)
             should_delete = True
             for key in keys:
@@ -810,7 +988,7 @@ class Resourcesmerge(BaseBulkEditor):
 
                             if infoTiledata not in mergeBaseResource[key]:
                                 should_delete = False
-
+                                mergeBaseResource[key].append(infoTiledata)
                                 added_resources.append(str(value.tileid))
             if baseId is not None:
                 if should_delete:
@@ -920,6 +1098,7 @@ class Resourcesmerge(BaseBulkEditor):
 
                             added_resources.append(str(tile.tileid))
                     else:
+                        self._uri_tile_replacements[str(value.tileid)] = matching_tiles[index_value]
                         tiledata_merge = self._get_tile_data(
                             matching_tiles[index_value]
                         )
@@ -1107,6 +1286,9 @@ class Resourcesmerge(BaseBulkEditor):
         if len(matching_tiles) == 1 and not flag_label:
             base = matching_tiles[0]
             mergeBaseResource = self._get_tile_data(base)
+            for key in keys:
+                if isinstance(info.get(key), list) and info[key]:
+                    mergeBaseResource[key] = _list_values(mergeBaseResource.get(key))
             listReference = self.all_list_reference(keys, base)
             should_delete = True
             for key in keys:
@@ -1125,7 +1307,11 @@ class Resourcesmerge(BaseBulkEditor):
                                 ) in ResourceXResource.objects.filter(
                                     resourcexid=infoTiledata["resourceXresourceId"]
                                 ):
-                                    setattr(resource_x_resource, RXR_FROM_FIELD, "")
+                                    setattr(
+                                        resource_x_resource,
+                                        RXR_FROM_FIELD,
+                                        Resource.objects.get(pk=baseId),
+                                    )
                                     setattr(resource_x_resource, RXR_TILE_FIELD, base)
                                     self._resource_x_resource_save(resource_x_resource)
 
@@ -1237,6 +1423,7 @@ class Resourcesmerge(BaseBulkEditor):
                             tile.resourceinstance = Resource.objects.get(pk=baseId)
                             self._tile_save(tile)
                     else:
+                        self._uri_tile_replacements[str(value.tileid)] = matching_tiles[index_value]
                         tiledata_merge = self._get_tile_data(
                             matching_tiles[index_value]
                         )
@@ -1252,18 +1439,22 @@ class Resourcesmerge(BaseBulkEditor):
                                     if "resourceId" in info_tiledata:
                                         if info_tiledata["resourceId"] not in list_info:
                                             tiledata_merge[key].append(info_tiledata)
-                                            updatevalue = """UPDATE resource_x_resource set resourceinstanceidfrom=%s,tileid=%s  where tileid=%s ; """
-                                            with connection.cursor() as cursor:
-                                                cursor.execute(
-                                                    updatevalue,
-                                                    (
-                                                        baseId,
-                                                        matching_tiles[
-                                                            index_value
-                                                        ].tileid,
-                                                        value.tileid,
-                                                    ),
+                                            for rxr in ResourceXResource.objects.filter(
+                                                resourcexid=info_tiledata[
+                                                    "resourceXresourceId"
+                                                ]
+                                            ):
+                                                setattr(
+                                                    rxr,
+                                                    RXR_FROM_FIELD,
+                                                    Resource.objects.get(pk=baseId),
                                                 )
+                                                setattr(
+                                                    rxr,
+                                                    RXR_TILE_FIELD,
+                                                    matching_tiles[index_value],
+                                                )
+                                                self._resource_x_resource_save(rxr)
                                     elif info_tiledata not in tiledata_merge[key]:
                                         tiledata_merge[key].append(info_tiledata)
                             elif (
@@ -1377,9 +1568,10 @@ class Resourcesmerge(BaseBulkEditor):
     def get_display_values_source_reference(
         self, tile: Tile, node: Node, datatype, added_reference_tileid=None
     ):
-        data = datatype.get_tile_data(tile)
-        if data:
-            nodevalue = datatype.get_nodevalues(data[str(node.nodeid)])
+        data = datatype.get_tile_data(tile) or {}
+        value = data.get(str(node.nodeid))
+        if value is not None:
+            nodevalue = _resource_references(datatype.get_nodevalues(value))
 
             items = []
             for resourceXresource in nodevalue:
@@ -1399,6 +1591,7 @@ class Resourcesmerge(BaseBulkEditor):
                 except Resource.DoesNotExist:
                     continue
             return items
+        return []
 
     def _get_widget_label(self, node, nod):
         widget_label = ""
@@ -1413,6 +1606,7 @@ class Resourcesmerge(BaseBulkEditor):
         return widget_label
 
     def get_mergeable_nodegroups(self, request: HttpRequest):
+        self._summary_card_name_cache = {}
         base_resource: str | None = request.POST.get("resourceBase", None)
         merge_resources: list[str] = request.POST.get("mergeResources", "").split(",")
         user_name = request.user.username
@@ -1442,6 +1636,11 @@ class Resourcesmerge(BaseBulkEditor):
                     "info_message": f"The resource with ID {base_resource} does not exist",
                 },
             }
+        try:
+            self._validate_single_cards(base_resource_tiles, merge_resources)
+            self._validate_incoming_references(base_resource, merge_resources)
+        except ValueError as exc:
+            return {"success": True, "data": {"info": "No", "info_message": str(exc)}}
         (
             _,
             _,
@@ -1597,24 +1796,16 @@ class Resourcesmerge(BaseBulkEditor):
         }
 
     def get_name_card(self, tile: Tile):
-        nodegroupp = models.NodeGroup.objects.get(pk=tile.nodegroup.nodegroupid)
-        nodes = Node.objects.filter(nodegroup=nodegroupp)
-        for node in nodes:
-            card_x_node_widgets = CardXNodeXWidget.objects.filter(node=node)
-            if not card_x_node_widgets.exists():
-                continue
-
-            for widget in card_x_node_widgets:
-                card: CardModel = widget.card
-                if card:
-                    card_name = str(card.name)
-                    break
-            if card_name:
-                break
-        card_name = card_name or str(tile.nodegroup.nodegroupid)
-        return card_name, str(tile.nodegroup.nodegroupid)
+        nodegroupid = str(tile.nodegroup_id)
+        return self.get_card_name_by_nodegroupid(nodegroupid), nodegroupid
 
     def get_card_name_by_nodegroupid(self, nodegroupid):
+        if not hasattr(self, "_summary_card_name_cache"):
+            self._summary_card_name_cache = {}
+        key = str(nodegroupid)
+        if key in self._summary_card_name_cache:
+            return self._summary_card_name_cache[key]
+
         nodegroupp = models.NodeGroup.objects.get(pk=nodegroupid)
         nodes = Node.objects.filter(nodegroup=nodegroupp)
         card_name = None
@@ -1630,7 +1821,8 @@ class Resourcesmerge(BaseBulkEditor):
                     break
             if card_name:
                 break
-        return card_name or str(nodegroupid)
+        self._summary_card_name_cache[key] = card_name or key
+        return self._summary_card_name_cache[key]
 
     def calculate_which_added_which_removed(
         self,
@@ -1640,6 +1832,7 @@ class Resourcesmerge(BaseBulkEditor):
         excluded_tile_ids=None,
     ):
 
+        self._uri_tile_replacements = {}
         base_resource_tiles = list(Tile.objects.filter(resourceinstance=base_resource))
         dict_counts = {}
         if excluded_tile_ids is None:
@@ -1650,13 +1843,17 @@ class Resourcesmerge(BaseBulkEditor):
             if card_name not in dict_counts:
                 dict_counts[card_name] = {}
                 if node_group_id == source_references_id:
-                    for tile_data in tile.data.get(source_references_id, []):
+                    for tile_data in _resource_references(
+                        self._get_tile_data(tile).get(source_references_id)
+                    ):
                         unique_reference_resources.add(tile_data.get("resourceId"))
                 else:
                     dict_counts[card_name][str(base_resource) + "_pre"] = 1
             else:
                 if node_group_id == source_references_id:
-                    for tile_data in tile.data.get(source_references_id, []):
+                    for tile_data in _resource_references(
+                        self._get_tile_data(tile).get(source_references_id)
+                    ):
                         unique_reference_resources.add(tile_data.get("resourceId"))
                 else:
                     dict_counts[card_name][str(base_resource) + "_pre"] += 1
@@ -1713,9 +1910,12 @@ class Resourcesmerge(BaseBulkEditor):
                     str(tile.tileid) in added
                     and str(tile.tileid) not in excluded_tile_ids
                 ):
-                    if len(tile.data.get(source_references_id, [])) > 0:
+                    references = _resource_references(
+                        self._get_tile_data(tile).get(source_references_id)
+                    )
+                    if references:
                         count_added = 0
-                        for tile_data in tile.data.get(source_references_id, []):
+                        for tile_data in references:
                             if tile_data.get("resourceId") in added_reference_tileid:
                                 count_added += 1
                         if count_added == 0:
@@ -1947,57 +2147,17 @@ class Resourcesmerge(BaseBulkEditor):
         for key in keys:
             if nameInfo[key] is None:
                 continue
-            if isinstance(nameInfo[key], list):
-                for info in nameInfo[key]:
-                    if "resourceId" not in info:
-                        continue
-
-                    for rxr in ResourceXResource.objects.filter(
-                        resourcexid=info["resourceXresourceId"]
-                    ):
-                        setattr(
-                            rxr,
-                            RXR_FROM_FIELD,
-                            Resource.objects.get(pk=base),
-                        )
-                        self._resource_x_resource_save(rxr)
+            for info in _resource_references(nameInfo[key]):
+                for rxr in ResourceXResource.objects.filter(
+                    resourcexid=info["resourceXresourceId"]
+                ):
+                    setattr(rxr, RXR_FROM_FIELD, Resource.objects.get(pk=base))
+                    self._resource_x_resource_save(rxr)
 
     def merge_reference(
         self, baseId: str, valueMerge: Tile, base: Tile, keys: list[str] | None
     ):
-        if not keys:
-            return
-
-        listReference = self.all_list_reference(keys, base)
-        valueInfo = self._get_tile_data(valueMerge)
-        baseInfo = self._get_tile_data(base)
-
-        for key in keys:
-            if valueInfo[key] is None:
-                continue
-            if isinstance(valueInfo[key], list):
-                for info in valueInfo[key]:
-                    if "resourceId" in info:
-                        if info["resourceId"] not in listReference:
-                            for rxr in ResourceXResource.objects.filter(
-                                resourcexid=info["resourceXresourceId"]
-                            ):
-                                setattr(
-                                    rxr,
-                                    RXR_FROM_FIELD,
-                                    Resource.objects.get(pk=baseId),
-                                )
-                                setattr(rxr, RXR_TILE_FIELD, base)
-                                self._resource_x_resource_save(rxr)
-                            baseInfo[key].append(info)
-                        else:
-                            for rxr in ResourceXResource.objects.filter(
-                                resourcexid=info["resourceXresourceId"]
-                            ):
-                                self._resource_x_resource_delete(rxr)
-
-        base.data = baseInfo
-        self._tile_save(base)
+        self._merge_reference_values(baseId, valueMerge, base, keys)
 
     def merge_reference_preview(
         self,
@@ -2007,41 +2167,83 @@ class Resourcesmerge(BaseBulkEditor):
         source_references_id: str,
         keys: list[str] | None,
     ):
-        if not keys:
-            return [], [], [], []
+        return self._merge_reference_values(
+            baseId, valueMerge, base, keys, source_references_id, preview=True
+        )
+
+    def _merge_reference_values(
+        self,
+        baseId: str,
+        valueMerge: Tile,
+        base: Tile,
+        keys: list[str] | None,
+        source_references_id: str | None = None,
+        *,
+        preview: bool = False,
+    ):
         added_tile = []
         removed_tile = []
         resource_id_added = []
         resource_id_merged = []
-        listReference = self.all_list_reference(keys, base)
         valueInfo = self._get_tile_data(valueMerge)
         baseInfo = self._get_tile_data(base)
-        for key in keys:
-            if valueInfo[key] is None:
-                continue
-            if isinstance(valueInfo[key], list):
-                for info in valueInfo[key]:
-                    if "resourceId" in info:
-                        if info["resourceId"] not in listReference:
-                            for rxr in ResourceXResource.objects.filter(
-                                resourcexid=info["resourceXresourceId"]
-                            ):
-                                setattr(
-                                    rxr,
-                                    RXR_FROM_FIELD,
-                                    Resource.objects.get(pk=baseId),
-                                )
-                                setattr(rxr, RXR_TILE_FIELD, base)
+        for key in keys or []:
+            base_values = _list_values(baseInfo.get(key))
+            for info in _list_values(valueInfo.get(key)):
+                is_resource = isinstance(info, dict) and "resourceId" in info
+                retained = next(
+                    (
+                        item
+                        for item in base_values
+                        if isinstance(item, dict)
+                        and is_resource
+                        and item.get("resourceId") == info["resourceId"]
+                    ),
+                    None,
+                )
+                if retained is not None:
+                    if key == source_references_id:
+                        resource_id_merged.append(info["resourceId"])
+                    if (
+                        not preview
+                        and info["resourceXresourceId"] != retained["resourceXresourceId"]
+                    ):
+                        for rxr in ResourceXResource.objects.filter(
+                            resourcexid=info["resourceXresourceId"]
+                        ):
+                            self._resource_x_resource_delete(rxr)
+                    continue
+                if not is_resource and info in base_values:
+                    continue
+                if is_resource and not preview:
+                    for rxr in ResourceXResource.objects.filter(
+                        resourcexid=info["resourceXresourceId"]
+                    ):
+                        setattr(rxr, RXR_FROM_FIELD, Resource.objects.get(pk=baseId))
+                        setattr(rxr, RXR_TILE_FIELD, base)
+                        self._resource_x_resource_save(rxr)
+                base_values.append(info)
+                baseInfo[key] = base_values
+                added_tile.append(str(valueMerge.tileid))
+                if is_resource and key == source_references_id:
+                    resource_id_added.append(info["resourceId"])
 
-                            baseInfo[key].append(info)
-                            added_tile.append(str(valueMerge.tileid))
-                            if key == source_references_id:
-                                resource_id_added.append(info["resourceId"])
-                    elif info not in baseInfo[key]:
-                        if key == source_references_id:
-                            resource_id_merged.append(info["resourceId"])
+        base.data = baseInfo
+        if keys and not preview:
+            self._tile_save(base)
 
         return added_tile, removed_tile, resource_id_added, resource_id_merged
+
+    def _repeat_metadata_matches(self, left: Tile, right: Tile) -> bool:
+        left_data, right_data = self._get_tile_data(left), self._get_tile_data(right)
+        for key in left_data.keys() | right_data.keys():
+            left_value, right_value = left_data.get(key), right_data.get(key)
+            if isinstance(left_value, list) and isinstance(right_value, list):
+                continue
+            # Scalar metadata distinguishes repeat occurrences, even at the same location.
+            if left_value != right_value:
+                return False
+        return True
 
     def check_information_preview(
         self,
@@ -2059,6 +2261,7 @@ class Resourcesmerge(BaseBulkEditor):
         removed_tile = []
         resource_id_added = []
         resource_id_merged = []
+        matching_row = [tile for tile in matching_row if self._repeat_metadata_matches(tile, value)]
         parent_tile_exists = Tile.objects.filter(tileid=value.tileid).exists()
         key_of_string_value = self.check_if_values_contain_string_value([value], keys)
 
@@ -2102,6 +2305,12 @@ class Resourcesmerge(BaseBulkEditor):
                                 == infoName[key_of_string_value]["en"]
                             ):
                                 baseInfo = Tile.objects.get(pk=childtileid)
+                                if self._get_uri_node_ids(baseInfo):
+                                    added_tile.append(str(childtileid))
+                                    return (
+                                        added_tile, removed_tile,
+                                        resource_id_added, resource_id_merged,
+                                    )
                                 if matching_child:
                                     for child in matching_child:
                                         if (
@@ -2210,6 +2419,7 @@ class Resourcesmerge(BaseBulkEditor):
         matching_child: list[Tile] | None = None,
         childKeys: list[str] | None = None,
     ):
+        matching_row = [tile for tile in matching_row if self._repeat_metadata_matches(tile, value)]
         parent_tile_exists = Tile.objects.filter(tileid=value.tileid).exists()
         key_of_string_value = self.check_if_values_contain_string_value([value], keys)
 
@@ -2272,6 +2482,15 @@ class Resourcesmerge(BaseBulkEditor):
                                 == infoName[key_of_string_value]["en"]
                             ):
                                 baseInfo = Tile.objects.get(pk=childtileid)
+                                if self._get_uri_node_ids(baseInfo):
+                                    order = max(
+                                        (child.sortorder or 0 for child in matching_child or []),
+                                        default=-1,
+                                    ) + 1
+                                    self.update_value(
+                                        base, baseInfo, order, childKeys, parenttile=tile
+                                    )
+                                    return None
                                 if matching_child:
                                     for child in matching_child:
                                         if (
@@ -2361,6 +2580,254 @@ class Resourcesmerge(BaseBulkEditor):
                 return {"success": False, "data": event_created["message"]}
         return response
 
+    def _get_uri_node_ids(self, tile: Tile) -> list[str]:
+        return [
+            key
+            for key, value in self._get_tile_data(tile).items()
+            if (
+                value is None
+                or isinstance(value, dict) and (not value or "url" in value)
+            )
+            and self.get_node(key).datatype == "url"
+        ]
+
+    def _uri_tiles_share_context(self, source: Tile, retained: Tile) -> bool:
+        source_parent, retained_parent = source.parenttile, retained.parenttile
+        while source_parent or retained_parent:
+            if not source_parent or not retained_parent:
+                return False
+            source_parent = self._uri_tile_replacements.get(
+                str(source_parent.tileid), source_parent
+            )
+            if source_parent.tileid == retained_parent.tileid:
+                return True
+            if (
+                source_parent.nodegroup != retained_parent.nodegroup
+                or source_parent.provisionaledits
+                or retained_parent.provisionaledits
+                or self._get_tile_data(source_parent)
+                != self._get_tile_data(retained_parent)
+            ):
+                return False
+            source_parent, retained_parent = (
+                source_parent.parenttile, retained_parent.parenttile
+            )
+        return True
+
+    def _merge_duplicate_uri_tile(
+        self, tile: Tile, base_tiles: list[Tile], *, preview: bool = False
+    ) -> bool:
+        uri_keys = self._get_uri_node_ids(tile)
+        source_data = self._get_tile_data(tile)
+        if (
+            not uri_keys
+            or tile.provisionaledits
+            or not any(
+                isinstance(source_data[key], dict) and source_data[key].get("url")
+                for key in uri_keys
+            )
+        ):
+            return False
+        for retained in base_tiles:
+            if (
+                retained.nodegroup != tile.nodegroup
+                or retained.provisionaledits
+                or not self._uri_tiles_share_context(tile, retained)
+            ):
+                continue
+            retained_data = self._get_tile_data(retained)
+            merged_data = dict(retained_data)
+            for key in source_data.keys() | retained_data.keys():
+                source_value, retained_value = (
+                    source_data.get(key), retained_data.get(key)
+                )
+                if key not in uri_keys:
+                    if source_value != retained_value:
+                        break
+                    continue
+                if not isinstance(source_value, dict):
+                    if source_value != retained_value:
+                        break
+                    continue
+                if not isinstance(retained_value, dict):
+                    break
+                if any(
+                    source_value.get(name) != retained_value.get(name)
+                    for name in source_value.keys() | retained_value.keys()
+                    if name != "url_label"
+                ):
+                    break
+                source_label, retained_label = (
+                    source_value.get("url_label"), retained_value.get("url_label")
+                )
+                if source_label and retained_label and source_label != retained_label:
+                    break
+                if source_label and not retained_label:
+                    merged_data[key] = {**retained_value, "url_label": source_label}
+            else:
+                if ResourceXResource.objects.filter(
+                    **{RXR_TILE_FIELD: tile.tileid}
+                ).exists():
+                    return False
+                if merged_data != retained_data:
+                    retained.data = merged_data
+                    if not preview:
+                        self._tile_save(retained)
+                # Keep the source intact for descendant processing and logged cleanup/undo.
+                self._uri_tile_replacements[str(tile.tileid)] = retained
+                return True
+        return False
+
+    @staticmethod
+    def _single_card_value(base, source):
+        if base == source or source in (None, "", [], {}):
+            return base
+        if base in (None, "", [], {}):
+            return source
+        if isinstance(base, list) and isinstance(source, list):
+            merged = list(base)
+            for item in source:
+                duplicate = next((old for old in merged if isinstance(old, dict)
+                    and isinstance(item, dict) and old.get("resourceId")
+                    and old.get("resourceId") == item.get("resourceId")), None)
+                if duplicate is not None:
+                    merged[merged.index(duplicate)] = Resourcesmerge._single_card_value(duplicate, item)
+                elif item not in merged:
+                    merged.append(item)
+            return merged
+        if isinstance(base, dict) and isinstance(source, dict):
+            merged = dict(base)
+            for key, value in source.items():
+                if key == "resourceXresourceId" and base.get("resourceId") == source.get("resourceId"):
+                    continue
+                merged[key] = Resourcesmerge._single_card_value(base.get(key), value)
+            return merged
+        raise ValueError("Conflicting nonblank values in a single-occurrence card")
+
+    def _single_card_data(self, retained, source):
+        if retained.provisionaledits or source.provisionaledits:
+            raise ValueError("Review provisional edits before merging single-occurrence cards")
+        base_data, source_data = self._get_tile_data(retained), self._get_tile_data(source)
+        merged = dict(base_data)
+        for key, value in source_data.items():
+            base_value = base_data.get(key)
+            node = self.get_node(key)
+            # Preserve the existing base-label precedence for top-level cards.
+            if node.name in ("_label", "label") and retained.parenttile is None and source.parenttile is None:
+                continue
+            if node.datatype in ("concept-list", "resource-instance-list"):
+                base_value, value = _list_values(base_value), _list_values(value)
+            try:
+                merged[key] = self._single_card_value(base_value, value)
+            except ValueError as exc:
+                raise ValueError(f"{exc}: node {key}; base tile {retained.tileid}; source tile {source.tileid}") from exc
+        return merged
+
+    def _validate_single_cards(self, base_tiles, sources, excluded=()):
+        from copy import copy
+
+        # Simulate parent mappings and combined data before any source is written.
+        contexts = {}
+        parents = {}
+        excluded = set(map(str, excluded))
+        for tile in self._order_tiles_parent_first(list(base_tiles)):
+            parent_id = str(tile.parenttile.tileid) if tile.parenttile else None
+            key = (str(tile.nodegroup.nodegroupid), parent_id)
+            retained = copy(tile)
+            contexts.setdefault(key, []).append(retained)
+            parents[str(tile.tileid)] = retained
+        for owner in sources:
+            tiles = self._order_tiles_parent_first(list(Tile.objects.filter(resourceinstance=owner)))
+            singleton_ancestors = set()
+            for tile in tiles:
+                if str(tile.tileid) in excluded or str(tile.nodegroup.cardinality) != "1":
+                    continue
+                parent = tile.parenttile
+                while parent:
+                    singleton_ancestors.add(str(parent.tileid))
+                    parent = parent.parenttile
+            for tile in tiles:
+                if str(tile.tileid) in excluded:
+                    continue
+                ancestor = tile.parenttile
+                while ancestor:
+                    if str(ancestor.tileid) in excluded:
+                        raise ValueError("A selected tile has an excluded parent; exclude its descendants too")
+                    ancestor = ancestor.parenttile
+                parent = parents.get(str(tile.parenttile.tileid), tile.parenttile) if tile.parenttile else None
+                key = (str(tile.nodegroup.nodegroupid), str(parent.tileid) if parent else None)
+                candidates = contexts.setdefault(key, [])
+                if str(tile.nodegroup.cardinality) == "1":
+                    if len(candidates) > 1:
+                        raise ValueError("Ambiguous parent context for a single-occurrence card")
+                    if candidates:
+                        retained = copy(candidates[0])
+                        retained.data = self._single_card_data(retained, tile)
+                        candidates[0] = retained
+                    else:
+                        retained = copy(tile)
+                        retained.parenttile = parent
+                        candidates.append(retained)
+                else:
+                    matches = [old for old in candidates
+                               if not old.provisionaledits and not tile.provisionaledits
+                               and self._get_tile_data(old) == self._get_tile_data(tile)]
+                    if str(tile.tileid) in singleton_ancestors:
+                        source_data = self._get_tile_data(tile)
+                        source_refs = {r["resourceId"] for v in source_data.values() for r in _resource_references(v)}
+                        for old in candidates:
+                            if old in matches:
+                                continue
+                            old_data = self._get_tile_data(old)
+                            shared_label = any(isinstance(value, dict) and value.get("en")
+                                and isinstance(old_data.get(key), dict)
+                                and value["en"] == old_data[key].get("en")
+                                for key, value in source_data.items())
+                            old_refs = {r["resourceId"] for v in old_data.values() for r in _resource_references(v)}
+                            no_label = not any(isinstance(v, dict) and v.get("en") for v in source_data.values())
+                            if shared_label or source_refs & old_refs or (no_label and len(candidates) == 1):
+                                raise ValueError("Ambiguous parent context for a single-occurrence card; review parent metadata")
+                    if len(matches) > 1 and str(tile.tileid) in singleton_ancestors:
+                        raise ValueError("Ambiguous parent context for a single-occurrence card")
+                    if len(matches) == 1:
+                        retained = matches[0]
+                    else:
+                        retained = copy(tile)
+                        retained.parenttile = parent
+                        candidates.append(retained)
+                parents[str(tile.tileid)] = retained
+
+    def _single_card_parent(self, tile, base_tiles, base_resource):
+        if not tile.parenttile:
+            return None
+        parent = tile.parenttile
+        mapped = self._uri_tile_replacements.get(str(parent.tileid))
+        if mapped is not None:
+            return mapped
+        moved = list(Tile.objects.filter(tileid=parent.tileid, resourceinstance=base_resource))
+        if moved:
+            return moved[0]
+        context = self._uri_tile_replacements.get(str(parent.parenttile.tileid), parent.parenttile) if parent.parenttile else None
+        matches = [old for old in base_tiles if old.nodegroup == parent.nodegroup
+                   and (old.parenttile.tileid if old.parenttile else None) == (context.tileid if context else None)
+                   and self._get_tile_data(old) == self._get_tile_data(parent)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _retain_single_card(self, retained, tile, base_resource, *, preview=False):
+        merged = self._single_card_data(retained, tile)
+        if not preview:
+            accepted = {str(ref.get("resourceXresourceId"))
+                        for value in merged.values() for ref in _resource_references(value)}
+            for rxr in ResourceXResource.objects.filter(**{RXR_TILE_FIELD: tile.tileid}):
+                if str(rxr.resourcexid) in accepted:
+                    setattr(rxr, RXR_FROM_FIELD, Resource.objects.get(pk=base_resource))
+                    setattr(rxr, RXR_TILE_FIELD, retained)
+                    self._resource_x_resource_save(rxr)
+        retained.data = merged
+        if not preview:
+            self._tile_save(retained)
+        self._uri_tile_replacements[str(tile.tileid)] = retained
+
     def _process_merge_tile_preview(
         self,
         resource: str,
@@ -2369,7 +2836,8 @@ class Resourcesmerge(BaseBulkEditor):
         base_tiles: list[Tile],
         source_references_id: str,
     ):
-
+        if self._merge_duplicate_uri_tile(tile, base_tiles, preview=True):
+            return [], [], [], []
         added_tile = []
         removed_tile = []
         resource_id_added = []
@@ -2398,6 +2866,19 @@ class Resourcesmerge(BaseBulkEditor):
         logger.warning(f"Tile {tile.tileid} has keys {keys}")
         logger.warning(f"{base_resource}")
 
+        retained_parent = self._single_card_parent(tile, base_tiles, base_resource) if cardinality == "1" else None
+        if cardinality == "1" and retained_parent is not None:
+            children = [same for same in matching_tiles_by_nodegroups
+                        if same.parenttile and same.parenttile.tileid == retained_parent.tileid]
+            if len(children) > 1:
+                raise ValueError("Multiple base tiles in a single-occurrence card")
+            if children:
+                self._retain_single_card(children[0], tile, base_resource, preview=True)
+                return [str(children[0].tileid)], [], [], []
+            tile.parenttile = retained_parent
+            self._uri_tile_replacements[str(tile.tileid)] = tile
+            return [str(tile.tileid)], [], [], []
+
         if cardinality != "1" or parent_tile_id is not None:
             if parent_tile_id is None:
                 added, removed, resource_id_added_, resource_id_merged_ = (
@@ -2417,14 +2898,18 @@ class Resourcesmerge(BaseBulkEditor):
 
                 return added_tile, removed_tile, resource_id_added, resource_id_merged
 
-            parent_tiles = Tile.objects.filter(tileid=parent_tile_id)
+            parent_tiles = (
+                [self._uri_tile_replacements[parent_tile_id]]
+                if parent_tile_id in self._uri_tile_replacements
+                else Tile.objects.filter(tileid=parent_tile_id)
+            )
 
             for parent_tile in parent_tiles:
-                matching_row = [
-                    same
-                    for same in base_tiles
-                    if same.nodegroup == parent_tile.nodegroup
-                ]
+                matching_row = (
+                    [parent_tile]
+                    if parent_tile_id in self._uri_tile_replacements
+                    else [same for same in base_tiles if same.nodegroup == parent_tile.nodegroup]
+                )
                 parent_keys: list[str] = list((self._get_tile_data(parent_tile)).keys())
                 added, removed, resource_id_added_, resource_id_merged_ = (
                     self.check_information_preview(
@@ -2453,8 +2938,11 @@ class Resourcesmerge(BaseBulkEditor):
             if tiles_with_matching_nodegroup == []:
                 added_tile.append(str(tile.tileid))
             else:
-                for matching_tile in tiles_with_matching_nodegroup:
-                    added_tile.append(str(matching_tile.tileid))
+                if len(tiles_with_matching_nodegroup) != 1:
+                    raise ValueError("Multiple base tiles in a single-occurrence card")
+                retained = tiles_with_matching_nodegroup[0]
+                self._retain_single_card(retained, tile, base_resource, preview=True)
+                added_tile.append(str(retained.tileid))
         return added_tile, removed_tile, resource_id_added, resource_id_merged
 
     def _process_merge_tile(
@@ -2464,7 +2952,8 @@ class Resourcesmerge(BaseBulkEditor):
         base_resource: str,
         base_tiles: list[Tile],
     ):
-
+        if self._merge_duplicate_uri_tile(tile, base_tiles):
+            return
         nodegroupid = str(tile.nodegroup.nodegroupid)
 
         if not self.nodegroups.get(nodegroupid):
@@ -2488,6 +2977,18 @@ class Resourcesmerge(BaseBulkEditor):
             information.keys()
         )  # einai ta node pou exei mesa to tile mesa se auto to nodegroupid ta keys dld sto tiledata
 
+        retained_parent = self._single_card_parent(tile, base_tiles, base_resource) if cardinality == "1" else None
+        if cardinality == "1" and retained_parent is not None:
+            children = [same for same in matching_tiles_by_nodegroups
+                        if same.parenttile and same.parenttile.tileid == retained_parent.tileid]
+            if len(children) > 1:
+                raise ValueError("Multiple base tiles in a single-occurrence card")
+            if children:
+                self._retain_single_card(children[0], tile, base_resource, preview=False)
+                return
+            self.update_value(base_resource, tile, tile.sortorder or 0, keys, parenttile=retained_parent)
+            return
+
         if cardinality != "1" or parent_tile_id is not None:
             if parent_tile_id is None:
                 self.check_information(
@@ -2499,14 +3000,18 @@ class Resourcesmerge(BaseBulkEditor):
                 )
                 return
 
-            parent_tiles = Tile.objects.filter(tileid=parent_tile_id)
+            parent_tiles = (
+                [self._uri_tile_replacements[parent_tile_id]]
+                if parent_tile_id in self._uri_tile_replacements
+                else Tile.objects.filter(tileid=parent_tile_id)
+            )
 
             for parent_tile in parent_tiles:
-                matching_row = [
-                    same
-                    for same in base_tiles
-                    if same.nodegroup == parent_tile.nodegroup
-                ]
+                matching_row = (
+                    [parent_tile]
+                    if parent_tile_id in self._uri_tile_replacements
+                    else [same for same in base_tiles if same.nodegroup == parent_tile.nodegroup]
+                )
                 parent_keys: list[str] = list((self._get_tile_data(parent_tile)).keys())
                 self.check_information(
                     matching_row,
@@ -2537,14 +3042,27 @@ class Resourcesmerge(BaseBulkEditor):
                 tile.resourceinstance = Resource.objects.get(pk=base_resource)
                 self._tile_save(tile)
             else:
-                for rxr in ResourceXResource.objects.filter(
-                    **{RXR_TILE_FIELD: tile.tileid}
-                ):
-                    self._resource_x_resource_delete(rxr)
+                if len(tiles_with_matching_nodegroup) != 1:
+                    raise ValueError("Multiple base tiles in a single-occurrence card")
+                retained = tiles_with_matching_nodegroup[0]
+                self._retain_single_card(retained, tile, base_resource)
 
-                for matching_tile in tiles_with_matching_nodegroup:
-                    tile.parenttile = matching_tile
-                    self._tile_save(tile)
+    @staticmethod
+    def _order_tiles_parent_first(tiles: list[Tile]) -> list[Tile]:
+        tile_ids = {str(tile.tileid) for tile in tiles}
+        children: dict[str, list[Tile]] = {}
+        ordered = []
+        for tile in tiles:
+            parent_id = str(tile.parenttile.tileid) if tile.parenttile else None
+            if parent_id in tile_ids:
+                children.setdefault(parent_id, []).append(tile)
+            else:
+                ordered.append(tile)
+        for tile in ordered:
+            ordered.extend(children.get(str(tile.tileid), []))
+        if len(ordered) != len(tiles):
+            raise ValueError("Cannot merge tiles with cyclic parents")
+        return ordered
 
     def _process_merge_resource_preview(
         self,
@@ -2557,7 +3075,9 @@ class Resourcesmerge(BaseBulkEditor):
         if excluded_tile_ids is None:
             excluded_tile_ids = []
 
-        merge_resource_tiles = Tile.objects.filter(resourceinstance=resource)
+        merge_resource_tiles = self._order_tiles_parent_first(
+            list(Tile.objects.filter(resourceinstance=resource))
+        )
         added_tile = []
         removed_tile = []
         resource_id_added = []
@@ -2581,12 +3101,24 @@ class Resourcesmerge(BaseBulkEditor):
             resource_id_added.extend(resource_id_added_)
             resource_id_merged.extend(resource_id_merged_)
 
+            if (
+                str(merge_resource_tile.tileid) in added
+                and (self._get_uri_node_ids(merge_resource_tile) or (
+                    str(merge_resource_tile.nodegroup.cardinality) == "1"
+                ))
+            ):
+                base_tiles.append(merge_resource_tile)
+
         for merge_resource_tile in merge_resource_tiles:
             if (
                 merge_resource_tile.parenttile is not None
                 and str(merge_resource_tile.tileid) in added_tile
             ):
-                if str(merge_resource_tile.parenttile.tileid) not in added_tile:
+                if (
+                    str(merge_resource_tile.parenttile.tileid) not in added_tile
+                    and str(merge_resource_tile.parenttile.tileid) not in self._uri_tile_replacements
+                    and not self._get_uri_node_ids(merge_resource_tile)
+                ):
                     added_tile.remove(str(merge_resource_tile.tileid))
         return added_tile, removed_tile, resource_id_added, resource_id_merged
 
@@ -2600,13 +3132,22 @@ class Resourcesmerge(BaseBulkEditor):
         log_event_details(self.loadid, f"|Merging resource {resource}")
         if excluded_tile_ids is None:
             excluded_tile_ids = []
-        merge_resource_tiles = Tile.objects.filter(resourceinstance=resource)
+        merge_resource_tiles = self._order_tiles_parent_first(
+            list(Tile.objects.filter(resourceinstance=resource))
+        )
         for merge_resource_tile in merge_resource_tiles:
             if str(merge_resource_tile.tileid) in excluded_tile_ids:
                 continue
             self._process_merge_tile(
                 resource, merge_resource_tile, base_resource, base_tiles
             )
+            if self._get_uri_node_ids(merge_resource_tile) or (
+                str(merge_resource_tile.nodegroup.cardinality) == "1"
+            ):
+                for retained in Tile.objects.filter(
+                    tileid=merge_resource_tile.tileid, resourceinstance=base_resource
+                ):
+                    base_tiles.append(retained)
 
     @staticmethod
     def get_tiles_value():
@@ -2823,7 +3364,7 @@ class Resourcesmerge(BaseBulkEditor):
             rows = cursor.fetchall()
 
             # Extract only related_resource_id column (index 1)
-            related_ids = [row[0] for row in rows]
+            related_ids = [row[0] for row in rows if row[0]]
 
             return len(related_ids), related_ids
 
@@ -2863,7 +3404,7 @@ class Resourcesmerge(BaseBulkEditor):
             cursor.execute(query, params)
 
             rows = cursor.fetchall()
-            related_ids = [row[0] for row in rows]
+            related_ids = [row[0] for row in rows if row[0]]
 
             return len(related_ids), related_ids
 
@@ -2885,7 +3426,7 @@ class Resourcesmerge(BaseBulkEditor):
             rows = cursor.fetchall()
 
             # Extract only related_resource_id column (index 1)
-            related_ids = [row[0] for row in rows]
+            related_ids = [row[0] for row in rows if row[0]]
 
             return len(set(related_ids)), list(set(related_ids))
 
@@ -2911,7 +3452,7 @@ class Resourcesmerge(BaseBulkEditor):
     ):
         name = str(resource) + prefix
         source_reference_card_name = None
-        resource_tiles = list(Tile.objects.filter(resourceinstance=resource))
+        resource_tiles = list(models.TileModel.objects.filter(resourceinstance=resource))
         for tile in resource_tiles:
             card_name, node_group_id = self.get_name_card(tile)
 
@@ -2968,7 +3509,7 @@ class Resourcesmerge(BaseBulkEditor):
         name = str(resource)
         source_reference_card_name = None
 
-        resource_tiles = list(Tile.objects.filter(resourceinstance=resource))
+        resource_tiles = list(models.TileModel.objects.filter(resourceinstance=resource))
 
         for tile in resource_tiles:
             card_name, node_group_id = self.get_name_card(tile)
@@ -3079,7 +3620,6 @@ class Resourcesmerge(BaseBulkEditor):
         event.taskid = edit_task.task_id
         event.save()
 
-    @transaction.atomic
     def run_load_task(
         self,
         userid: str,
@@ -3088,11 +3628,14 @@ class Resourcesmerge(BaseBulkEditor):
         merge_resources: list[str],
         excluded_tile_ids: list[str] | None = None,
     ):
+        self._summary_card_name_cache = {}
+        self._uri_tile_replacements = {}
         if not self.user:
             self.user = User.objects.get(pk=userid)
 
         if excluded_tile_ids is None:
             excluded_tile_ids = []
+        database_merged = False
         try:
             with transaction.atomic():
                 logger.warning(
@@ -3106,6 +3649,8 @@ class Resourcesmerge(BaseBulkEditor):
                     Tile.objects.filter(resourceinstance=base_resource)
                 )
 
+                self._validate_single_cards(base_resource_tiles, merge_resources, excluded_tile_ids)
+                self._validate_incoming_references(base_resource, merge_resources)
                 total_merge_counts = []
                 total_source_reference_counts = []
                 resourceids_of_related_resources = set()
@@ -3257,8 +3802,10 @@ class Resourcesmerge(BaseBulkEditor):
                 )
 
                 post_merge_tiles = [
-                    str(tile.tileid)
-                    for tile in Tile.objects.filter(resourceinstance=base_resource)
+                    str(tile)
+                    for tile in models.TileModel.objects.filter(
+                        resourceinstance=base_resource
+                    ).values_list("tileid", flat=True)
                 ]
 
                 total_merge_counts.append((base_resource, count_of_related_resources))
@@ -3313,15 +3860,6 @@ class Resourcesmerge(BaseBulkEditor):
 
                 log_event_details(loadid, "|Done, Indexing...")
                 logger.warning("Done, indexing...")
-                index_resources_by_transaction(
-                    loadid,
-                    quiet=True,
-                    use_multiprocessing=False,
-                    recalculate_descriptors=True,
-                )
-
-                logger.warning("Merge Resources completed")
-                log_event_details(loadid, "|Done")
                 change_summary = self._build_change_summary(base_resource)
 
                 # Add merge counts to the summary
@@ -3344,17 +3882,27 @@ class Resourcesmerge(BaseBulkEditor):
                     load_details["dictCounts"] = dict_counts_normalized
                     load_details["userNameMerge"] = self.user.username
                     event.load_details = load_details
-                event.status = "indexed"
-                event.indexed_time = datetime.now()
+                event.status = "unindexed"
+                event.indexed_time = None
                 event.complete = True
-                event.successful = True
+                event.successful = False
                 event.save()
-                return {"success": True, "data": "done"}
+            database_merged = True
+            self._refresh_resource_indexes(loadid)
+            log_event_details(loadid, "|Done")
+            event.status = "indexed"
+            event.indexed_time = datetime.now()
+            event.successful = True
+            event.save()
+            logger.warning("Merge Resources completed")
+            return {"success": True, "data": "done"}
         except Exception as e:
             logger.exception("Exception occurred")
 
             event = LoadEvent.objects.get(loadid=loadid)
-            event.status = "failed"
+            event.status = "unindexed" if database_merged else "failed"
+            event.successful = False
+            event.error_message = str(e)
             event.load_end_time = datetime.now()
             event.save()
 
