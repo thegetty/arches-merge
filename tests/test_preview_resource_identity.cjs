@@ -101,3 +101,14 @@ test('new plugin component registers independently of an already loaded host mer
     assert.equal(typeof registered['arches-resource-merge'].viewModel, 'function');
     assert.ok(source.includes('templates/views/components/etl_modules/arches-resource-merge.htm'));
 });
+test('merge status displays asynchronous errors as text and tolerates no selected load', () => {
+    const block = template.match(/<!-- ko if: (selectedLoadEvent\(\) && selectedLoadEvent\(\)\.error_message) -->\s*<div[^>]*role="alert"[^>]*data-bind="(text: selectedLoadEvent\(\)\.error_message)"[^>]*>/);
+    assert.ok(block, 'Persisted errors must be displayed in an alert using a text binding');
+    const history = fs.readFileSync(path.join(root, 'templates/views/components/plugins/etl-manager.htm'), 'utf8');
+    assert.match(history, /<!-- ko if: event\.error_message -->\s*<div[^>]*role="alert"[^>]*data-bind="text: event\.error_message"/);
+    assert.equal(vm.runInNewContext(block[1], {selectedLoadEvent: () => null}), null);
+    const message = '<script>unsafe markup</script> Undo refused';
+    const context = {selectedLoadEvent: () => ({error_message: message})};
+    assert.equal(vm.runInNewContext(block[1], context), message);
+    assert.equal(vm.runInNewContext(`({${block[2]}})`, context).text, message);
+});

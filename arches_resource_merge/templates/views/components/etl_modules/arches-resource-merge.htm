@@ -1137,6 +1137,9 @@
             <!-- /ko -->
         </div>
     </div>
+    <!-- ko if: selectedLoadEvent() && selectedLoadEvent().error_message -->
+    <div class="alert alert-danger" role="alert" data-bind="text: selectedLoadEvent().error_message"></div>
+    <!-- /ko -->
     <div style="padding-top: 10px">
         <span
             class="etl-loading-metadata-key"

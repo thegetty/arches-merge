@@ -708,6 +708,8 @@ class IndexLifecycleTests(unittest.TestCase):
 
     def test_undo_reindexes_restored_empty_source_and_related_owner(self):
         self.merge.reverse_load("test-load")
+        cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
+        self.assertIn("error_message = ''", cursor.execute.call_args_list[-1].args[0])
         self.assertEqual(self.calls[0], ("restore", "test-load"))
         self.assertEqual({rid for operation, rid in self.calls if operation == "delete"}, {"base", "source", "peer"})
         self.assertEqual({rid for operation, rid in self.calls if operation == "index"}, {"base", "source", "peer"})
@@ -721,14 +723,31 @@ class IndexLifecycleTests(unittest.TestCase):
             resource.index.assert_called_once()
         self.merge._deserialize_models.assert_called_once_with("source snapshot")
 
+    def test_refused_undo_persists_error_after_rollback_without_relabeling_merge(self):
+        message = "Cannot unload merge: a value changed after this merge; review later edits"
+        self.merge.reverse_edit_log_entries.side_effect = ValueError(message)
+        cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
+        writes = []
+        cursor.execute.side_effect = lambda sql, params: writes.append((sql, params, self.atomic_depth))
+        with self.assertRaisesRegex(ValueError, "review later edits"):
+            self.merge.reverse_load("test-load")
+        error_writes = [(params, depth) for sql, params, depth in writes if "error_message" in sql]
+        self.assertEqual(error_writes, [((message, "test-load"), 0)])
+        self.assertEqual([params[0] for sql, params, _ in writes if "SET status" in sql], ["reversing"])
+        self.assertNotIn(("index", "base"), self.calls)
+        self.assertEqual(self.atomic_depth, 0)
+
     def test_undo_index_failure_does_not_report_unloaded(self):
         self.resources["peer"].index.side_effect = RuntimeError("index unavailable")
         with self.assertRaisesRegex(RuntimeError, "index unavailable"):
             self.merge.reverse_load("test-load")
         cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
-        statuses = [call.args[1][0] for call in cursor.execute.call_args_list]
+        statuses = [call.args[1][0] for call in cursor.execute.call_args_list if "SET status" in call.args[0]]
         self.assertIn("unindexed", statuses)
         self.assertNotIn("unloaded", statuses)
+        self.assertTrue(any("error_message" in call.args[0] and
+                            call.args[1] == ("index unavailable", "test-load")
+                            for call in cursor.execute.call_args_list))
 
     def test_merge_index_failure_does_not_report_success(self):
         self.prepare_merge()
@@ -770,7 +789,7 @@ class IndexLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "refresh unavailable"):
             self.merge.reverse_load("test-load")
         cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
-        statuses = [call.args[1][0] for call in cursor.execute.call_args_list]
+        statuses = [call.args[1][0] for call in cursor.execute.call_args_list if "SET status" in call.args[0]]
         self.assertEqual(statuses[-1], "unindexed")
         self.assertNotIn("unloaded", statuses)
 

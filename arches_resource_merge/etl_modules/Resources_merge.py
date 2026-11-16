@@ -562,20 +562,29 @@ class Resourcesmerge(BaseBulkEditor):
         se.refresh(index=f"{RESOURCES_INDEX},{TERMS_INDEX}")
 
     def reverse_load(self, loadid: str):
-        with transaction.atomic(), connection.cursor() as cursor:
-            cursor.execute(
-                """UPDATE load_event SET status = %s WHERE loadid = %s""",
-                ("reversing", loadid),
-            )
-            resources_changed_count = self.reverse_edit_log_entries(loadid)
-            cursor.execute(
-                """UPDATE load_event SET status = %s WHERE loadid = %s""",
-                ("unindexed", loadid),
-            )
-        self._refresh_resource_indexes(loadid)
+        try:
+            with transaction.atomic(), connection.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE load_event SET status = %s WHERE loadid = %s""",
+                    ("reversing", loadid),
+                )
+                resources_changed_count = self.reverse_edit_log_entries(loadid)
+                cursor.execute(
+                    """UPDATE load_event SET status = %s WHERE loadid = %s""",
+                    ("unindexed", loadid),
+                )
+            self._refresh_resource_indexes(loadid)
+        except Exception as exc:
+            # Record refusal after rollback, preserving the actual merge/index state.
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE load_event SET error_message = %s WHERE loadid = %s",
+                    (str(exc), loadid),
+                )
+            raise
         with connection.cursor() as cursor:
             cursor.execute(
-                """UPDATE load_event SET status = %s, load_details = load_details::jsonb || ('{"resources_removed":' || %s || '}')::jsonb WHERE loadid = %s""",
+                """UPDATE load_event SET status = %s, error_message = '', load_details = load_details::jsonb || ('{"resources_removed":' || %s || '}')::jsonb WHERE loadid = %s""",
                 ("unloaded", resources_changed_count, loadid),
             )
 
