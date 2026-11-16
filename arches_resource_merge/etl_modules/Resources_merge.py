@@ -620,7 +620,9 @@ class Resourcesmerge(BaseBulkEditor):
     def _reverse_snapshot_value(before, after, current):
         from copy import deepcopy
 
-        conflict = "Cannot unload merge: a value changed after this merge; review later edits"
+        conflict = (
+            "Cannot unload merge: a value changed after this merge; review later edits"
+        )
         if before == after or current == before:
             return deepcopy(current)
         if current == after:
@@ -629,7 +631,9 @@ class Resourcesmerge(BaseBulkEditor):
             result = deepcopy(current)
             missing = object()
             for key in before.keys() | after.keys():
-                old, new, now = (value.get(key, missing) for value in (before, after, current))
+                old, new, now = (
+                    value.get(key, missing) for value in (before, after, current)
+                )
                 if old == new:
                     continue
                 if old is missing:
@@ -651,7 +655,10 @@ class Resourcesmerge(BaseBulkEditor):
         if all(isinstance(value, list) for value in (before, after, current)):
             maps = []
             for values in (before, after, current):
-                if any(not isinstance(v, dict) or not v.get("resourceXresourceId") for v in values):
+                if any(
+                    not isinstance(v, dict) or not v.get("resourceXresourceId")
+                    for v in values
+                ):
                     raise ValueError(conflict)
                 indexed = {v["resourceXresourceId"]: v for v in values}
                 if len(indexed) != len(values):
@@ -663,8 +670,17 @@ class Resourcesmerge(BaseBulkEditor):
                 raise ValueError(conflict)
             if any(key not in now and old[key] != new[key] for key in old):
                 raise ValueError(conflict)
-            return [Resourcesmerge._reverse_snapshot_value(old[v["resourceXresourceId"]], new[v["resourceXresourceId"]], v)
-                    if v["resourceXresourceId"] in old else deepcopy(v) for v in current]
+            restored_values = []
+            for value in current:
+                relationship_id = value["resourceXresourceId"]
+                if relationship_id in old:
+                    restored = Resourcesmerge._reverse_snapshot_value(
+                        old[relationship_id], new[relationship_id], value
+                    )
+                else:
+                    restored = deepcopy(value)
+                restored_values.append(restored)
+            return restored_values
         raise ValueError(conflict)
 
     def _reverse_snapshot(self, edit_log, original=None):
@@ -2801,7 +2817,9 @@ class Resourcesmerge(BaseBulkEditor):
             contexts.setdefault(key, []).append(retained)
             parents[str(tile.tileid)] = retained
         for owner in sources:
-            tiles = self._order_tiles_parent_first(list(Tile.objects.filter(resourceinstance=owner)))
+            tiles = self._order_tiles_parent_first(
+                list(Tile.objects.filter(resourceinstance=owner))
+            )
             singleton_ancestors = set()
             for tile in tiles:
                 if str(tile.tileid) in excluded or str(tile.nodegroup.cardinality) != "1":
@@ -2816,14 +2834,25 @@ class Resourcesmerge(BaseBulkEditor):
                 ancestor = tile.parenttile
                 while ancestor:
                     if str(ancestor.tileid) in excluded:
-                        raise ValueError("A selected tile has an excluded parent; exclude its descendants too")
+                        raise ValueError(
+                            "A selected tile has an excluded parent; exclude its descendants too"
+                        )
                     ancestor = ancestor.parenttile
-                parent = parents.get(str(tile.parenttile.tileid), tile.parenttile) if tile.parenttile else None
-                key = (str(tile.nodegroup.nodegroupid), str(parent.tileid) if parent else None)
+                parent = (
+                    parents.get(str(tile.parenttile.tileid), tile.parenttile)
+                    if tile.parenttile
+                    else None
+                )
+                key = (
+                    str(tile.nodegroup.nodegroupid),
+                    str(parent.tileid) if parent else None,
+                )
                 candidates = contexts.setdefault(key, [])
                 if str(tile.nodegroup.cardinality) == "1":
                     if len(candidates) > 1:
-                        raise ValueError("Ambiguous parent context for a single-occurrence card")
+                        raise ValueError(
+                            "Ambiguous parent context for a single-occurrence card"
+                        )
                     if candidates:
                         retained = copy(candidates[0])
                         retained.data = self._single_card_data(retained, tile)
@@ -2833,26 +2862,52 @@ class Resourcesmerge(BaseBulkEditor):
                         retained.parenttile = parent
                         candidates.append(retained)
                 else:
-                    matches = [old for old in candidates
-                               if not old.provisionaledits and not tile.provisionaledits
-                               and self._get_tile_data(old) == self._get_tile_data(tile)]
+                    matches = [
+                        old
+                        for old in candidates
+                        if not old.provisionaledits
+                        and not tile.provisionaledits
+                        and self._get_tile_data(old) == self._get_tile_data(tile)
+                    ]
                     if str(tile.tileid) in singleton_ancestors:
                         source_data = self._get_tile_data(tile)
-                        source_refs = {r["resourceId"] for v in source_data.values() for r in _resource_references(v)}
+                        source_refs = {
+                            r["resourceId"]
+                            for v in source_data.values()
+                            for r in _resource_references(v)
+                        }
                         for old in candidates:
                             if old in matches:
                                 continue
                             old_data = self._get_tile_data(old)
-                            shared_label = any(isinstance(value, dict) and value.get("en")
+                            shared_label = any(
+                                isinstance(value, dict)
+                                and value.get("en")
                                 and isinstance(old_data.get(key), dict)
                                 and value["en"] == old_data[key].get("en")
-                                for key, value in source_data.items())
-                            old_refs = {r["resourceId"] for v in old_data.values() for r in _resource_references(v)}
-                            no_label = not any(isinstance(v, dict) and v.get("en") for v in source_data.values())
-                            if shared_label or source_refs & old_refs or (no_label and len(candidates) == 1):
-                                raise ValueError("Ambiguous parent context for a single-occurrence card; review parent metadata")
+                                for key, value in source_data.items()
+                            )
+                            old_refs = {
+                                r["resourceId"]
+                                for v in old_data.values()
+                                for r in _resource_references(v)
+                            }
+                            no_label = not any(
+                                isinstance(v, dict) and v.get("en")
+                                for v in source_data.values()
+                            )
+                            if (
+                                shared_label
+                                or source_refs & old_refs
+                                or (no_label and len(candidates) == 1)
+                            ):
+                                raise ValueError(
+                                    "Ambiguous parent context for a single-occurrence card; review parent metadata"
+                                )
                     if len(matches) > 1 and str(tile.tileid) in singleton_ancestors:
-                        raise ValueError("Ambiguous parent context for a single-occurrence card")
+                        raise ValueError(
+                            "Ambiguous parent context for a single-occurrence card"
+                        )
                     if len(matches) == 1:
                         retained = matches[0]
                     else:
