@@ -553,12 +553,22 @@ class Resourcesmerge(BaseBulkEditor):
         if not resource_ids:
             return
 
-        for resource_id in sorted(resource_ids):
-            Resource().delete_index(resourceinstanceid=resource_id)
+        current_terms = {}
         for resource in Resource.objects.filter(pk__in=resource_ids):
             resource.load_tiles()
             resource.save_descriptors()
             resource.index()
+            _, terms = resource.get_documents_to_index(fetchTiles=False)
+            current_terms[str(resource.pk)] = [term["_id"] for term in terms]
+        # Make transferred terms visible under their new owner before cleanup.
+        se.refresh(index=f"{RESOURCES_INDEX},{TERMS_INDEX}")
+        for resource_id, term_ids in current_terms.items():
+            se.delete(index=TERMS_INDEX, query={"query": {"bool": {
+                "filter": [{"term": {"resourceinstanceid": resource_id}}],
+                "must_not": [{"ids": {"values": term_ids}}],
+            }}})
+        for resource_id in sorted(resource_ids - current_terms.keys()):
+            Resource().delete_index(resourceinstanceid=resource_id)
         se.refresh(index=f"{RESOURCES_INDEX},{TERMS_INDEX}")
 
     def reverse_load(self, loadid: str):

@@ -642,7 +642,8 @@ class IndexLifecycleTests(unittest.TestCase):
         self.deleter = Mock()
         self.deleter.delete_index.side_effect = lambda **kw: self.calls.append(("delete", kw["resourceinstanceid"]))
         for rid in ("base", "peer", "source"):
-            resource = Mock()
+            resource = Mock(pk=rid)
+            resource.get_documents_to_index.return_value = ({}, [{"_id": rid+"-current-term"}])
             resource.load_tiles.side_effect = lambda rid=rid: self.calls.append(("tiles", rid))
             resource.save_descriptors.side_effect = lambda rid=rid: self.calls.append(("descriptors", rid))
             resource.index.side_effect = lambda rid=rid: self.calls.append(("index", rid))
@@ -700,8 +701,11 @@ class IndexLifecycleTests(unittest.TestCase):
         self.prepare_merge()
         result = self.merge.run_load_task("user", "test-load", "base", ["source"])
         self.assertTrue(result["success"])
-        self.deleter.delete_index.assert_any_call(resourceinstanceid="source")
+        self.deleter.delete_index.assert_called_once_with(resourceinstanceid="source")
         self.assertNotIn(("index", "source"), self.calls)
+        source_delete = self.calls.index(("delete", "source"))
+        self.assertTrue(all(self.calls.index(("index", rid)) < source_delete for rid in ("base", "peer")))
+        self.assertIn(("refresh", "resources,terms"), self.calls[:source_delete])
         self.assertEqual(self.calls[-1], ("refresh", "resources,terms"))
         self.assertEqual(self.event.status, "indexed")
         self.resource_model.objects.filter.assert_called_once_with(pk__in={"base", "peer", "source"})
@@ -711,17 +715,38 @@ class IndexLifecycleTests(unittest.TestCase):
         cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
         self.assertIn("error_message = ''", cursor.execute.call_args_list[-1].args[0])
         self.assertEqual(self.calls[0], ("restore", "test-load"))
-        self.assertEqual({rid for operation, rid in self.calls if operation == "delete"}, {"base", "source", "peer"})
+        self.deleter.delete_index.assert_not_called()
         self.assertEqual({rid for operation, rid in self.calls if operation == "index"}, {"base", "source", "peer"})
         self.assertEqual(self.calls[-1], ("refresh", "resources,terms"))
-        last_delete = max(i for i, call in enumerate(self.calls) if call[0] == "delete")
-        first_index = min(i for i, call in enumerate(self.calls) if call[0] == "index")
-        self.assertLess(last_delete, first_index)
         for resource in self.resources.values():
             resource.load_tiles.assert_called_once()
             resource.save_descriptors.assert_called_once()
             resource.index.assert_called_once()
         self.merge._deserialize_models.assert_called_once_with("source snapshot")
+
+    def test_rebuild_failure_does_not_delete_existing_documents_or_terms(self):
+        for failing_resource in ("base", "peer"):
+            with self.subTest(failing_resource=failing_resource):
+                self.setUp()
+                self.prepare_merge()
+                self.resources[failing_resource].index.side_effect = RuntimeError("index unavailable")
+                result = self.merge.run_load_task("user", "test-load", "base", ["source"])
+                self.assertFalse(result["success"])
+                self.assertEqual(self.event.status, "unindexed")
+                self.deleter.delete_index.assert_not_called()
+                self.ns["se"].delete.assert_not_called()
+
+    def test_stale_term_cleanup_excludes_current_terms_and_unrelated_resources(self):
+        self.merge._refresh_resource_indexes("test-load")
+        deletes = self.ns["se"].delete.call_args_list
+        self.assertEqual(len(deletes), 3)
+        for call in deletes:
+            self.assertEqual(call.kwargs["index"], "terms")
+            query = call.kwargs["query"]["query"]["bool"]
+            rid = query["filter"][0]["term"]["resourceinstanceid"]
+            self.assertIn(rid, self.resources)
+            self.assertEqual(query["must_not"], [{"ids": {"values": [rid+"-current-term"]}}])
+            self.resources[rid].get_documents_to_index.assert_called_once_with(fetchTiles=False)
 
     def test_refused_undo_persists_error_after_rollback_without_relabeling_merge(self):
         message = "Cannot unload merge: a value changed after this merge; review later edits"
@@ -760,11 +785,13 @@ class IndexLifecycleTests(unittest.TestCase):
     def test_merge_rebuild_runs_after_database_transaction(self):
         self.prepare_merge()
         depths = []
-        self.deleter.delete_index.side_effect = lambda **kw: depths.append(self.atomic_depth)
-        self.resources["peer"].index.side_effect = RuntimeError("index unavailable")
+        def fail_index():
+            depths.append(self.atomic_depth)
+            raise RuntimeError("index unavailable")
+        self.resources["peer"].index.side_effect = fail_index
         result = self.merge.run_load_task("user", "test-load", "base", ["source"])
         self.assertFalse(result["success"])
-        self.assertEqual(depths, [0, 0, 0])
+        self.assertEqual(depths, [0])
         self.assertEqual(self.event.status, "unindexed")
         self.assertTrue(self.event.complete)
 
@@ -792,6 +819,8 @@ class IndexLifecycleTests(unittest.TestCase):
         statuses = [call.args[1][0] for call in cursor.execute.call_args_list if "SET status" in call.args[0]]
         self.assertEqual(statuses[-1], "unindexed")
         self.assertNotIn("unloaded", statuses)
+        self.deleter.delete_index.assert_not_called()
+        self.ns["se"].delete.assert_not_called()
 
 
 if __name__ == "__main__":
