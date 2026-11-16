@@ -43,6 +43,35 @@ class RelationshipReplayTests(unittest.TestCase):
                     helper.merge.reverse_edit_log_entries('test-load')
                     self.assertEqual(helper.snapshot(), before)
 
+    def test_distinct_scalar_children_of_matched_parents_survive_and_undo(self):
+        for key, old, new in [
+            ("date", "1901-01-01", "1899-05-05"),
+            ("concept", "concept-A", "concept-B"),
+            ("note", None, {"en": {"value": "Source note"}}),
+        ]:
+            with self.subTest(key=key):
+                helper = fixtures.UriMergeTests('runTest')
+                helper.setUp()
+                for owner, value in [("base", old), ("source", new)]:
+                    parent = helper.add_tile(owner+"-parent", owner, group="context",
+                                             data={"name": {"en": "Same parent"}})
+                    helper.add_tile(owner+"-child", owner, group="repeat-child", parent=parent,
+                                    data={key: value})
+                before = helper.snapshot()
+                added, *_ = helper.merge._process_merge_tile_preview(
+                    "source", helper.get_tile(pk="source-child"), "base",
+                    helper.filter_tiles(resourceinstance="base"), "references")
+                self.assertIn("source-child", added)
+                self.assertEqual(helper.snapshot(), before)
+                helper.execute("source")
+                for owner, value in [("base", old), ("source", new)]:
+                    child = helper.tiles[owner+"-child"]
+                    self.assertEqual(child.data, {key: value})
+                    self.assertEqual(child.resourceinstance, "base")
+                    self.assertEqual(child.parenttile.tileid, "base-parent")
+                helper.merge.reverse_edit_log_entries("test-load")
+                self.assertEqual(helper.snapshot(), before)
+
     def test_children_follow_the_parent_selected_before_reference_union(self):
         helper = fixtures.UriMergeTests('runTest')
         helper.setUp()

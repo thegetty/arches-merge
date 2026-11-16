@@ -76,6 +76,7 @@ class ResourcesMergeTests(unittest.TestCase):
     def setUp(self):
         self.ns = load_merge_methods()
         self.merge = self.ns["Resourcesmerge"].__new__(self.ns["Resourcesmerge"])
+        self.merge.get_node = lambda key: SimpleNamespace(datatype="concept-list")
         self.merge._tile_save = Mock()
         self.merge._tile_delete = Mock()
         self.merge._resource_x_resource_save = Mock()
@@ -145,6 +146,48 @@ class ResourcesMergeTests(unittest.TestCase):
                     self.assertEqual(base.data["type"], expected)
         self.merge._resource_x_resource_save.assert_not_called()
         self.merge._resource_x_resource_delete.assert_not_called()
+
+    def test_reference_merge_preserves_scalar_types_and_refuses_conflicts(self):
+        cases = [
+            ("date", None, "1901-01-01", "1901-01-01"),
+            ("concept", "", "concept-A", "concept-A"),
+            ("string", None, {"en": {"value": "Note"}}, {"en": {"value": "Note"}}),
+            ("boolean", None, False, False),
+            ("number", None, 0, 0),
+            ("date", "1901-01-01", None, "1901-01-01"),
+            ("concept", "concept-A", "concept-A", "concept-A"),
+        ]
+        conflicts = [
+            ("date", "1901-01-01", "1899-05-05"),
+            ("concept", "concept-A", "concept-B"),
+            ("string", {"en": {"value": "First"}}, {"en": {"value": "Second"}}),
+        ]
+        for preview in (True, False):
+            for datatype, old, new, expected in cases + [(*c, None) for c in conflicts]:
+                with self.subTest(preview=preview, datatype=datatype, base=old, source=new):
+                    self.setUp()
+                    self.merge.get_node = lambda key: SimpleNamespace(
+                        datatype="resource-instance-list" if key == "refs" else datatype)
+                    base = self.tile("base-tile", old)
+                    source = self.tile("source-tile", new)
+                    base.data["refs"] = []
+                    source.data["refs"] = [{"resourceId": "peer", "resourceXresourceId": "rx"}]
+                    before = copy.deepcopy(base.data)
+                    def run():
+                        if preview:
+                            return self.merge.merge_reference_preview("base", source, base, "refs", ["refs", "type"])
+                        return self.merge.merge_reference("base", source, base, ["refs", "type"])
+                    if expected is None:
+                        with self.assertRaisesRegex(ValueError, "Conflicting nonblank"):
+                            run()
+                        self.assertEqual(base.data, before)
+                        self.merge._tile_save.assert_not_called()
+                        self.merge._resource_x_resource_save.assert_not_called()
+                        self.merge._resource_x_resource_delete.assert_not_called()
+                    else:
+                        run()
+                        self.assertEqual(base.data["type"], expected)
+                        self.assertIs(type(base.data["type"]), type(expected))
 
     def test_missing_base_key_accepts_source_reference(self):
         ref = {"resourceId": "external", "resourceXresourceId": "relationship"}
@@ -235,7 +278,9 @@ class UriMergeTests(unittest.TestCase):
         self.ns["Resource"] = SimpleNamespace(objects=SimpleNamespace(get=lambda **kw: kw["pk"]))
         self.ns["NodeGroup"] = SimpleNamespace(objects=SimpleNamespace(
             get=lambda **kw: SimpleNamespace(nodegroupid=kw["nodegroupid"], cardinality="n")))
-        self.merge.get_node = lambda key: SimpleNamespace(name=key, datatype="url" if key == "uri" else "string")
+        self.merge.get_node = lambda key: SimpleNamespace(name=key, datatype=(
+            "url" if key == "uri" else "concept-list" if key == "types" else
+            "resource-instance-list" if key in ("refs", "location", "reference") else "string"))
         self.ns["Tile"] = SimpleNamespace(objects=SimpleNamespace(filter=self.filter_tiles, get=self.get_tile))
         self.ns["ResourceXResource"] = SimpleNamespace(objects=SimpleNamespace(filter=self.filter_relations))
         self.merge._tile_save = lambda tile: self.save("tile", tile.tileid, tile)

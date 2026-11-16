@@ -2186,8 +2186,17 @@ class Resourcesmerge(BaseBulkEditor):
         resource_id_added = []
         resource_id_merged = []
         valueInfo = self._get_tile_data(valueMerge)
-        baseInfo = self._get_tile_data(base)
+        baseInfo = dict(self._get_tile_data(base))
+        list_keys = []
+        # Validate scalar metadata before changing tiles or relationship rows.
         for key in keys or []:
+            if self.get_node(key).datatype in (
+                "resource-instance", "resource-instance-list", "concept-list"
+            ):
+                list_keys.append(key)
+            else:
+                baseInfo[key] = self._single_card_value(baseInfo.get(key), valueInfo.get(key))
+        for key in list_keys:
             base_values = _list_values(baseInfo.get(key))
             for info in _list_values(valueInfo.get(key)):
                 is_resource = isinstance(info, dict) and "resourceId" in info
@@ -2317,6 +2326,8 @@ class Resourcesmerge(BaseBulkEditor):
                                             child.parenttile
                                             and child.parenttile.tileid == tile.tileid
                                         ):
+                                            if not self._repeat_metadata_matches(child, baseInfo):
+                                                continue
                                             if (
                                                 childKeys
                                                 and self._has_distinct_single_reference(
@@ -2497,6 +2508,8 @@ class Resourcesmerge(BaseBulkEditor):
                                             child.parenttile
                                             and child.parenttile.tileid == tile.tileid
                                         ):
+                                            if not self._repeat_metadata_matches(child, baseInfo):
+                                                continue
                                             if (
                                                 childKeys
                                                 and self._has_distinct_single_reference(
