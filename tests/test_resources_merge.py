@@ -710,6 +710,27 @@ class IndexLifecycleTests(unittest.TestCase):
         self.assertEqual(self.event.status, "indexed")
         self.resource_model.objects.filter.assert_called_once_with(pk__in={"base", "peer", "source"})
 
+    def test_merge_and_undo_refresh_geometry_inside_transaction_before_indexing(self):
+        for undo in (False, True):
+            with self.subTest(undo=undo):
+                self.setUp()
+                self.prepare_merge()
+                depths = []
+                cursor = self.ns["connection"].cursor.return_value.__enter__.return_value
+                def execute(sql, params):
+                    if "refresh_tile_geojson_geometries" in sql:
+                        depths.append(self.atomic_depth)
+                        self.assertEqual(params, ("test-load",))
+                        self.assertIn("geojson-feature-collection", sql)
+                        self.assertIn("edit_log", sql)
+                        self.assertFalse(any(op == "index" for op, _ in self.calls))
+                cursor.execute.side_effect = execute
+                if undo:
+                    self.merge.reverse_load("test-load")
+                else:
+                    self.assertTrue(self.merge.run_load_task("user", "test-load", "base", ["source"])["success"])
+                self.assertEqual(depths, [1])
+
     def test_undo_reindexes_restored_empty_source_and_related_owner(self):
         self.merge.reverse_load("test-load")
         cursor = self.ns["connection"].cursor.return_value.__enter__.return_value

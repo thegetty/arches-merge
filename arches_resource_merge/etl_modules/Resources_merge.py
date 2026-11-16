@@ -536,6 +536,23 @@ class Resourcesmerge(BaseBulkEditor):
         logger.warning(response)
         return response
 
+    def _refresh_geometry_cache(self, loadid: str):
+        # Rebuild derived map rows from the current state of logged spatial tiles.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT refresh_tile_geojson_geometries(t.tileid)
+                   FROM tiles t
+                   JOIN (
+                       SELECT DISTINCT NULLIF(tileinstanceid, '')::uuid AS tileid
+                       FROM edit_log WHERE transactionid = %s
+                   ) changed ON changed.tileid = t.tileid
+                   WHERE EXISTS (
+                       SELECT 1 FROM nodes n WHERE n.nodegroupid = t.nodegroupid
+                       AND n.datatype = 'geojson-feature-collection'
+                   )""",
+                (loadid,),
+            )
+
     def _refresh_resource_indexes(self, loadid: str):
         changes = list(EditLog.objects.filter(transactionid=loadid))
         resource_ids = {
@@ -579,6 +596,7 @@ class Resourcesmerge(BaseBulkEditor):
                     ("reversing", loadid),
                 )
                 resources_changed_count = self.reverse_edit_log_entries(loadid)
+                self._refresh_geometry_cache(loadid)
                 cursor.execute(
                     """UPDATE load_event SET status = %s WHERE loadid = %s""",
                     ("unindexed", loadid),
@@ -3928,6 +3946,7 @@ class Resourcesmerge(BaseBulkEditor):
                     load_details["dictCounts"] = dict_counts_normalized
                     load_details["userNameMerge"] = self.user.username
                     event.load_details = load_details
+                self._refresh_geometry_cache(loadid)
                 event.status = "unindexed"
                 event.indexed_time = None
                 event.complete = True
