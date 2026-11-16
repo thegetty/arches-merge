@@ -2197,6 +2197,20 @@ class Resourcesmerge(BaseBulkEditor):
             else:
                 baseInfo[key] = self._single_card_value(baseInfo.get(key), valueInfo.get(key))
         for key in list_keys:
+            references = list(_resource_references(baseInfo.get(key)))
+            for reference in _resource_references(valueInfo.get(key)):
+                metadata = {k: v for k, v in reference.items() if k != "resourceXresourceId"}
+                for retained in references:
+                    if retained["resourceId"] == reference["resourceId"] and metadata != {
+                        k: v for k, v in retained.items() if k != "resourceXresourceId"
+                    }:
+                        raise ValueError(
+                            f"Cannot merge: conflicting relationship metadata for resource "
+                            f"{reference['resourceId']} in node {key}; "
+                            f"base tile {base.tileid}; source tile {valueMerge.tileid}"
+                        )
+                references.append(reference)
+        for key in list_keys:
             base_values = _list_values(baseInfo.get(key))
             for info in _list_values(valueInfo.get(key)):
                 is_resource = isinstance(info, dict) and "resourceId" in info

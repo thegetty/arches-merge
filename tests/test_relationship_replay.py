@@ -118,8 +118,9 @@ class RelationshipReplayTests(unittest.TestCase):
         helper = fixtures.UriMergeTests('runTest')
         helper.setUp()
         merge = helper.merge
-        shared = {'resourceId': 'peer-shared', 'resourceXresourceId': 'base-shared'}
-        duplicate = {'resourceId': 'peer-shared', 'resourceXresourceId': 'source-shared'}
+        metadata = {'ontologyProperty': 'same-property', 'inverseOntologyProperty': 'same-inverse'}
+        shared = {'resourceId': 'peer-shared', 'resourceXresourceId': 'base-shared', **metadata}
+        duplicate = {'resourceId': 'peer-shared', 'resourceXresourceId': 'source-shared', **metadata}
         distinct = {'resourceId': 'peer-distinct', 'resourceXresourceId': 'source-distinct'}
         base = helper.add_tile('base-tile', 'base', group='references', data={'refs': [shared]})
         source = helper.add_tile('source-tile', 'source', group='references', data={'refs': [duplicate, distinct]})

@@ -189,6 +189,32 @@ class ResourcesMergeTests(unittest.TestCase):
                         self.assertEqual(base.data["type"], expected)
                         self.assertIs(type(base.data["type"]), type(expected))
 
+    def test_reference_metadata_conflicts_are_refused_before_writes(self):
+        for field in ("ontologyProperty", "inverseOntologyProperty", "relationship", "inverseRelationship"):
+            for base_mode in ("different", "blank", "empty"):
+                for preview in (True, False):
+                    with self.subTest(field=field, base_mode=base_mode, preview=preview):
+                        self.setUp()
+                        base_ref = {"resourceId": "peer", "resourceXresourceId": "base-rx",
+                                    field: "" if base_mode == "blank" else "base-property"}
+                        source_ref = {"resourceId": "peer", "resourceXresourceId": "source-rx",
+                                      field: "source-property"}
+                        base = self.tile("base-tile", [] if base_mode == "empty" else [base_ref])
+                        source = self.tile("source-tile", [base_ref, source_ref] if base_mode == "empty" else [source_ref])
+                        # An earlier distinct reference must not be moved before refusal.
+                        base.data["earlier"] = []
+                        source.data["earlier"] = [{"resourceId": "other", "resourceXresourceId": "other-rx"}]
+                        before = copy.deepcopy((base.data, source.data))
+                        with self.assertRaisesRegex(ValueError, "conflicting relationship metadata.*peer.*type"):
+                            if preview:
+                                self.merge.merge_reference_preview("base", source, base, "type", ["earlier", "type"])
+                            else:
+                                self.merge.merge_reference("base", source, base, ["earlier", "type"])
+                        self.assertEqual((base.data, source.data), before)
+                        self.merge._tile_save.assert_not_called()
+                        self.merge._resource_x_resource_save.assert_not_called()
+                        self.merge._resource_x_resource_delete.assert_not_called()
+
     def test_missing_base_key_accepts_source_reference(self):
         ref = {"resourceId": "external", "resourceXresourceId": "relationship"}
         for preview in (True, False):
