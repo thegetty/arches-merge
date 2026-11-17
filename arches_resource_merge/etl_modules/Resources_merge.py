@@ -575,7 +575,12 @@ class Resourcesmerge(BaseBulkEditor):
             resource.load_tiles()
             resource.save_descriptors()
             resource.index()
-            _, terms = resource.get_documents_to_index(fetchTiles=False)
+            _, terms = resource.get_documents_to_index(
+                fetchTiles=False,
+                datatype_factory=self.datatype_factory,
+                node_datatypes={str(node["nodeid"]): node["datatype"]
+                                for node in resource.get_serialized_graph()["nodes"]},
+            )
             current_terms[str(resource.pk)] = [term["_id"] for term in terms]
         # Make transferred terms visible under their new owner before cleanup.
         se.refresh(index=f"{RESOURCES_INDEX},{TERMS_INDEX}")

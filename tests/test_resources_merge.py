@@ -637,12 +637,14 @@ class IndexLifecycleTests(unittest.TestCase):
         self.merge = self.ns["Resourcesmerge"].__new__(self.ns["Resourcesmerge"])
         self.merge.loadid = "test-load"
         self.merge.user = SimpleNamespace(username="tester")
+        self.merge.datatype_factory = Mock()
         self.calls = []
         self.resources = {}
         self.deleter = Mock()
         self.deleter.delete_index.side_effect = lambda **kw: self.calls.append(("delete", kw["resourceinstanceid"]))
         for rid in ("base", "peer", "source"):
             resource = Mock(pk=rid)
+            resource.get_serialized_graph.return_value = {"nodes": [{"nodeid": "name-node", "datatype": "string"}]}
             resource.get_documents_to_index.return_value = ({}, [{"_id": rid+"-current-term"}])
             resource.load_tiles.side_effect = lambda rid=rid: self.calls.append(("tiles", rid))
             resource.save_descriptors.side_effect = lambda rid=rid: self.calls.append(("descriptors", rid))
@@ -767,7 +769,9 @@ class IndexLifecycleTests(unittest.TestCase):
             rid = query["filter"][0]["term"]["resourceinstanceid"]
             self.assertIn(rid, self.resources)
             self.assertEqual(query["must_not"], [{"ids": {"values": [rid+"-current-term"]}}])
-            self.resources[rid].get_documents_to_index.assert_called_once_with(fetchTiles=False)
+            self.resources[rid].get_documents_to_index.assert_called_once_with(
+                fetchTiles=False, datatype_factory=self.merge.datatype_factory,
+                node_datatypes={"name-node": "string"})
 
     def test_refused_undo_persists_error_after_rollback_without_relabeling_merge(self):
         message = "Cannot unload merge: a value changed after this merge; review later edits"
