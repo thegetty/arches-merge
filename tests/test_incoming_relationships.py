@@ -7,6 +7,17 @@ from unittest.mock import Mock
 from tests import test_resources_merge as fixtures
 
 
+class TileRows(list):
+    def iterator(self, **kwargs):
+        return iter(self)
+
+    def union(self, other):
+        return TileRows({tile.tileid: tile for tile in [*self, *other]}.values())
+
+    def values_list(self, *args, **kwargs):
+        return []
+
+
 class IncomingRelationshipTests(unittest.TestCase):
     def setUp(self):
         self.h = fixtures.IndexLifecycleTests('runTest')
@@ -23,15 +34,50 @@ class IncomingRelationshipTests(unittest.TestCase):
         self.rows = [('base-rx', 'payment-tile', 'peer', 'base', 'actor')]
         self.links = Mock()
         self.links.values_list.side_effect = lambda *args, **kw: (
-            ['payment-tile'] if kw.get('flat') else self.rows)
+            list({row[1] for row in self.rows}) if kw.get('flat') else self.rows)
         self.h.ns['ResourceXResource'].objects.filter = lambda **kw: (
             self.links if self.h.ns['RXR_TO_FIELD'] + '__in' in kw else [])
-        tiles = Mock()
-        tiles.values_list.return_value = []
-        tiles.iterator.side_effect = lambda **kw: iter([self.tile])
-        self.h.ns['Tile'].objects.filter = lambda **kw: tiles if 'tileid__in' in kw else []
+        def linked_tiles(**kwargs):
+            return TileRows([self.tile] if self.tile.tileid in kwargs.get('tileid__in', []) else [])
+        self.h.ns['Tile'].objects.filter = lambda **kw: linked_tiles(**kw)
+        self.data_query = Mock(side_effect=lambda **kw: TileRows([self.tile]))
         self.h.ns['models'] = SimpleNamespace(TileModel=SimpleNamespace(
-            objects=SimpleNamespace(filter=lambda **kw: tiles)))
+            objects=SimpleNamespace(filter=linked_tiles, extra=self.data_query)))
+
+    def test_no_sources_skips_tile_data_discovery(self):
+        self.h.merge._validate_incoming_references('base', [])
+        self.data_query.assert_not_called()
+
+    def test_completely_unbacked_incoming_tile_is_refused_in_preview_and_execution(self):
+        for scalar in (False, True):
+            for preview in (False, True):
+                with self.subTest(scalar=scalar, preview=preview):
+                    self.setUp()
+                    self.rows.clear()
+                    source_ref = self.references[1]
+                    self.tile.data = {'actor': source_ref if scalar else [source_ref]}
+                    before = copy.deepcopy(self.tile.data)
+                    if preview:
+                        self.h.ns['Resource'].objects.get.return_value = SimpleNamespace(graph_id='graph', graph='graph')
+                        self.h.ns['Graph'] = Mock()
+                        self.h.merge.get_source_references_ids = Mock(return_value=[])
+                        self.h.merge._validate_single_cards = Mock()
+                        self.h.ns['Tile'].objects.filter = lambda **kw: [self.tile] if 'resourceinstance' in kw else []
+                        self.h.merge.calculate_which_added_which_removed = Mock()
+                        request = SimpleNamespace(POST={'resourceBase': 'base', 'mergeResources': 'source'},
+                                                  user=self.h.merge.user)
+                        result = self.h.merge.get_mergeable_nodegroups(request)
+                        self.assertEqual(result['data']['info'], 'No')
+                        self.assertIn('payment-tile', result['data']['info_message'])
+                        self.h.merge.calculate_which_added_which_removed.assert_not_called()
+                    else:
+                        result = self.h.merge.run_load_task('user', 'test-load', 'base', ['source'])
+                        self.assertFalse(result['success'])
+                        self.assertIn('payment-tile', result['data']['message'])
+                    self.h.merge._process_merge_resource.assert_not_called()
+                    self.h.merge._resource_delete.assert_not_called()
+                    self.h.deleter.delete_index.assert_not_called()
+                    self.assertEqual(self.tile.data, before)
 
     def test_reference_validation_does_not_construct_graph_aware_tiles(self):
         self.rows.append(('missing-rx', 'payment-tile', 'peer', 'source', 'actor'))

@@ -749,6 +749,8 @@ class Resourcesmerge(BaseBulkEditor):
 
     def _validate_incoming_references(self, base_resource: str, merge_resources: list[str]):
         sources = set(map(str, merge_resources))
+        if not sources:
+            return
         incoming = ResourceXResource.objects.filter(
             **{f"{RXR_TO_FIELD}__in": [base_resource, *merge_resources]}
         )
@@ -758,10 +760,13 @@ class Resourcesmerge(BaseBulkEditor):
                 "pk", RXR_TILE_FIELD, RXR_FROM_FIELD, RXR_TO_FIELD, RXR_NODE_FIELD
             )
         }
-        # Shared incoming tiles can contain unbacked references to another source.
+        # Discover unbacked references independently of relationship rows.
         tiles = models.TileModel.objects.filter(
             tileid__in=incoming.values_list(RXR_TILE_FIELD, flat=True)
-        )
+        ).union(models.TileModel.objects.extra(
+            where=["jsonb_path_query_array(tiledata, '$.*.resourceId') ?| %s::text[]"],
+            params=[sorted(sources)],
+        ))
         seen = set()
         for tile in tiles.iterator(chunk_size=200):
             while tile is not None and str(tile.tileid) not in seen:
@@ -774,7 +779,8 @@ class Resourcesmerge(BaseBulkEditor):
                         expected = (str(tile.tileid), str(tile.resourceinstance_id), target, str(nodeid))
                         if rows.get(str(reference.get("resourceXresourceId"))) != expected:
                             raise ValueError(
-                                f"Cannot merge: reference in tile {tile.tileid} has a missing or "
+                                f"Cannot merge: reference in tile {tile.tileid} "
+                                f"(node {nodeid}, target {target}) has a missing or "
                                 "inconsistent relationship row. Repair the reference before merging."
                             )
                 tile = tile.parenttile if tile.parenttile_id and str(tile.parenttile_id) not in seen else None

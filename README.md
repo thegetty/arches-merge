@@ -67,6 +67,19 @@ backend module: Resources_merge.py
 class: Resourcesmerge
 ```
 
+Migration `0002` changes the component to
+`views/components/etl_modules/arches-resource-merge`. Migration `0003` creates
+`arches_merge_incoming_resource_ids_gin` concurrently on the `resourceId` values
+extracted from `tiles.tiledata`. Preview and execution use the matching expression
+to find incoming references even when their relationship records are missing.
+
+For large databases, schedule and monitor this build. Memory allocation and disk
+limits are deployment choices; the migration does not change PostgreSQL settings.
+An identical valid index created beforehand is reused without rebuilding. An
+invalid or incompatible index with the same name stops the migration for manual
+inspection. Reversing `0003` drops the matching index concurrently, including a
+previously created index adopted by the migration; it does not change resource data.
+
 ## Build Frontend Assets
 
 After installing the extension or changing hosted apps, rebuild the host

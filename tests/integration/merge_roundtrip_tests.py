@@ -71,6 +71,21 @@ class MergeDatabaseRoundtripTests(TestCase):
             self.editor._tile_delete(Tile.objects.get(pk=self.tiles[1].pk))
             self.editor._resource_delete(Resource.objects.get(pk=self.source.pk))
 
+    def test_tile_data_discovery_refuses_completely_unbacked_incoming_reference(self):
+        incoming = models.TileModel.objects.create(
+            resourceinstance=self.peer, nodegroup=self.group,
+            data={str(self.ref_node.pk): [{"resourceId": str(self.source.pk),
+                   "resourceXresourceId": str(uuid4())}]},
+        )
+        reference = incoming.data[str(self.ref_node.pk)][0]
+        for value in (reference, [reference]):
+            with self.subTest(value=value):
+                before = {str(self.ref_node.pk): value}
+                models.TileModel.objects.filter(pk=incoming.pk).update(data=before)
+                with self.assertRaisesRegex(ValueError, str(incoming.pk)):
+                    self.editor._validate_incoming_references(str(self.base.pk), [str(self.source.pk)])
+                self.assertEqual(models.TileModel.objects.get(pk=incoming.pk).data, before)
+
     def test_reference_merge_and_native_unload_restore_database_exactly(self):
         before = self.snapshot()
         self.merge()
