@@ -3,8 +3,11 @@ from django.conf.urls.static import static
 from django.conf.urls.i18n import i18n_patterns
 from django.urls import include, path
 
+from arches_resource_merge.views import ETLManagerView
+
 urlpatterns = [
     # project-level urls
+    path("etl-manager", ETLManagerView.as_view(), name="etl_manager"),
 ]
 
 # Ensure Arches core urls are superseded by project-level urls

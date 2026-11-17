@@ -16,17 +16,22 @@ def bulk_data_merge_resources(userid, load_id, baseResource, mergeResources,excl
         merge_resources.run_load_task(userid, load_id, baseResource, mergeResources, excluded_tile_ids)
 
         load_event = models.LoadEvent.objects.get(loadid=load_id)
-        status = _("Completed") if load_event.status == "indexed" else _("Failed")
     except Exception as e:
         logger.error(e)
         load_event = models.LoadEvent.objects.get(loadid=load_id)
-        load_event.status = "failed"
-        load_event.save()
+        if load_event.status not in ("indexed", "unindexed"):
+            load_event.status = "failed"
+            load_event.save()
+
+    if load_event.status == "indexed":
+        status = _("Completed")
+    elif load_event.status == "unindexed":
+        status = _("Merged, but not indexed")
+    else:
         status = _("Failed")
-    finally:
-        msg = _("Bulk Data Edit: {} [{}]").format(status, status)
-        user = User.objects.get(id=userid)
-        notify_completion(msg, user)
+    msg = _("Bulk Data Edit: {} [{}]").format(status, status)
+    user = User.objects.get(id=userid)
+    notify_completion(msg, user)
 
 def notify_completion(msg, user, notiftype_name=None, context=None):
     if notiftype_name is not None:

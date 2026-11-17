@@ -111,6 +111,9 @@
                                     </div>
                                 </div>
                             </div>
+                            <!-- ko if: event.error_message -->
+                            <div class="alert alert-danger" role="alert" data-bind="text: event.error_message"></div>
+                            <!-- /ko -->
                             <div class="etl-job-task-bar">
                                 <div class="task">
                                     <!-- ko if: (["completed", "indexed", "unindexed"].includes(event.status)) && event.etl_module.reversible -->

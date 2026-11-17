@@ -48,6 +48,32 @@ INSTALLED_APPS = (
 INSTALLED_APPS += ("arches.app",)
 ```
 
+### Bounded Task History
+
+The plugin provides an `ETLManagerView` that counts history records in SQL and
+fetches only the requested five-record page, rather than materializing all saved
+merge snapshots on every poll. It retains the core view's permissions, response
+format, and behavior for all other GET actions and POST operations. The history
+list still includes all ETL modules, including CSV imports.
+
+When the host uses its own URL configuration, import the plugin view there:
+
+```python
+from arches_resource_merge.views import ETLManagerView as MergeETLManagerView
+```
+
+Add this entry to the host's `urlpatterns` **before** its existing
+`include("arches.urls")` entry:
+
+```python
+path("etl-manager", MergeETLManagerView.as_view(), name="etl_manager"),
+```
+
+The plugin's own URL configuration already registers this route. No frontend
+changes or database migration are needed. Individual records on the selected
+page still include their saved details, so an exceptionally large record can
+remain expensive to display.
+
 ## Apply Migrations
 
 Run the extension migration from the host Arches project:
@@ -66,6 +92,19 @@ component: views/components/etl_modules/Resources_merge
 backend module: Resources_merge.py
 class: Resourcesmerge
 ```
+
+Migration `0002` changes the component to
+`views/components/etl_modules/arches-resource-merge`. Migration `0003` creates
+`arches_merge_incoming_resource_ids_gin` concurrently on the `resourceId` values
+extracted from `tiles.tiledata`. Preview and execution use the matching expression
+to find incoming references even when their relationship records are missing.
+
+For large databases, schedule and monitor this build. Memory allocation and disk
+limits are deployment choices; the migration does not change PostgreSQL settings.
+An identical valid index created beforehand is reused without rebuilding. An
+invalid or incompatible index with the same name stops the migration for manual
+inspection. Reversing `0003` drops the matching index concurrently, including a
+previously created index adopted by the migration; it does not change resource data.
 
 ## Build Frontend Assets
 
@@ -91,6 +130,31 @@ For production deployments, use the host project's production build command.
 7. Use the task history undo action if a reversible merge needs to be rolled
    back.
 
+## URI Merging
+
+Equivalent URI tiles collapse into one entry when they use the same URL node,
+literal URI, and parent context. A nonblank source label can fill a blank retained
+label. Different nonblank labels, other conflicting metadata, pending edits, and
+directly attached relationship rows keep their separate entries. URI spelling is
+not normalized and different model fields are not combined. Existing duplicates
+already on the base are not retroactively removed.
+
+Preview and execution share the matching rule. Descendants are processed after
+their parents and reparented to the retained tile. The original source URI stays
+intact until normal logged cleanup; label edits and child reparenting also use the
+existing edit-log path. Native undo and its seven-day limit are unchanged.
+
+Focused checks (no database required):
+
+```bash
+python -m unittest discover -s tests -p test_resources_merge.py -v
+```
+
+These checks use an in-memory ORM boundary, including native edit-log replay.
+They do not replace approved database merge/unload and report acceptance tests.
+Count-based runner validation can flag intentionally collapsed tiles for review;
+verify semantic values and ownership instead of treating equal counts as proof.
+
 ## Development
 
 Useful local checks:
@@ -102,3 +166,12 @@ npm run build_development
 ```
 
 Run database-changing commands only against an approved local or test database.
+
+With local test database settings configured, run the task-history regressions:
+
+```bash
+python manage.py test tests.integration.task_history_tests --settings=tests.test_settings
+```
+
+These check SQL pagination, response compatibility, inherited permissions, and
+delegation of non-history operations using Django's isolated test database.
