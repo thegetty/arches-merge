@@ -48,6 +48,32 @@ INSTALLED_APPS = (
 INSTALLED_APPS += ("arches.app",)
 ```
 
+### Bounded Task History
+
+The plugin provides an `ETLManagerView` that counts history records in SQL and
+fetches only the requested five-record page, rather than materializing all saved
+merge snapshots on every poll. It retains the core view's permissions, response
+format, and behavior for all other GET actions and POST operations. The history
+list still includes all ETL modules, including CSV imports.
+
+When the host uses its own URL configuration, import the plugin view there:
+
+```python
+from arches_resource_merge.views import ETLManagerView as MergeETLManagerView
+```
+
+Add this entry to the host's `urlpatterns` **before** its existing
+`include("arches.urls")` entry:
+
+```python
+path("etl-manager", MergeETLManagerView.as_view(), name="etl_manager"),
+```
+
+The plugin's own URL configuration already registers this route. No frontend
+changes or database migration are needed. Individual records on the selected
+page still include their saved details, so an exceptionally large record can
+remain expensive to display.
+
 ## Apply Migrations
 
 Run the extension migration from the host Arches project:
@@ -140,3 +166,12 @@ npm run build_development
 ```
 
 Run database-changing commands only against an approved local or test database.
+
+With local test database settings configured, run the task-history regressions:
+
+```bash
+python manage.py test tests.integration.task_history_tests --settings=tests.test_settings
+```
+
+These check SQL pagination, response compatibility, inherited permissions, and
+delegation of non-history operations using Django's isolated test database.
