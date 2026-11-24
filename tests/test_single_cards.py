@@ -11,7 +11,7 @@ class SingleCardTests(unittest.TestCase):
         self.ns['NodeGroup'].objects.get=lambda **kw: SimpleNamespace(nodegroupid=kw['nodegroupid'],cardinality='1')
         self.merge.get_node=lambda key: SimpleNamespace(
             name='_label' if key=='label-node' else key,
-            datatype='resource-instance-list' if key=='ref' else 'date' if key=='birth-date' else 'string')
+            datatype='resource-instance-list' if key=='ref' else 'domain-value-list' if key=='domains' else 'date' if key=='birth-date' else 'string')
 
     def test_group_and_place_labels_keep_base_and_unload_exactly(self):
         source_value = {'en': {'value': 'Source label', 'direction': 'ltr'}}
@@ -103,6 +103,12 @@ class SingleCardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.merge._process_merge_tile('source',source,'base',[base])
         self.assertEqual(self.snapshot(),before)
+
+    def test_multi_value_datatype_unions_instead_of_conflicting(self):
+        # domain-value-list is detected through collects_multiple_values().
+        base=self.add_tile('base-tile','base',group='single',data={'domains':['a']})
+        source=self.add_tile('source-tile','source',group='single',data={'domains':['b']})
+        self.assertEqual(self.merge._single_card_data(base, source)['domains'],['a','b'])
 
     def test_preflight_detects_conflict_between_sources_with_empty_base(self):
         self.add_tile('first','source',group='single',data={'text':'First'})

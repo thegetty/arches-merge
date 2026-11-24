@@ -2254,9 +2254,9 @@ class Resourcesmerge(BaseBulkEditor):
         list_keys = []
         # Validate scalar metadata before changing tiles or relationship rows.
         for key in keys or []:
-            if self.get_node(key).datatype in (
-                "resource-instance", "resource-instance-list", "concept-list"
-            ):
+            node = self.get_node(key)
+            # Single resource-instance values are also lists of references.
+            if node.datatype == "resource-instance" or self._collects_multiple_values(node):
                 list_keys.append(key)
             else:
                 baseInfo[key] = self._single_card_value(baseInfo.get(key), valueInfo.get(key))
@@ -2769,6 +2769,9 @@ class Resourcesmerge(BaseBulkEditor):
                 return True
         return False
 
+    def _collects_multiple_values(self, node) -> bool:
+        return self.datatype_factory.get_instance(node.datatype).collects_multiple_values()
+
     @staticmethod
     def _single_card_value(base, source):
         if base == source or source in (None, "", [], {}):
@@ -2806,7 +2809,7 @@ class Resourcesmerge(BaseBulkEditor):
             # Preserve the existing base-label precedence for top-level cards.
             if node.name in ("_label", "label") and retained.parenttile is None and source.parenttile is None:
                 continue
-            if node.datatype in ("concept-list", "resource-instance-list"):
+            if self._collects_multiple_values(node):
                 base_value, value = _list_values(base_value), _list_values(value)
             try:
                 merged[key] = self._single_card_value(base_value, value)

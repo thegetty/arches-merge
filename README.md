@@ -94,17 +94,44 @@ class: Resourcesmerge
 ```
 
 Migration `0002` changes the component to
-`views/components/etl_modules/arches-resource-merge`. Migration `0003` creates
-`arches_merge_incoming_resource_ids_gin` concurrently on the `resourceId` values
-extracted from `tiles.tiledata`. Preview and execution use the matching expression
-to find incoming references even when their relationship records are missing.
+`views/components/etl_modules/arches-resource-merge`.
 
-For large databases, schedule and monitor this build. Memory allocation and disk
-limits are deployment choices; the migration does not change PostgreSQL settings.
-An identical valid index created beforehand is reused without rebuilding. An
-invalid or incompatible index with the same name stops the migration for manual
-inspection. Reversing `0003` drops the matching index concurrently, including a
-previously created index adopted by the migration; it does not change resource data.
+## Optional Index for Large Databases
+
+Before changing anything, preview and execution look for tiles that reference the
+merged resources, including references whose relationship records are missing.
+That lookup reads the `resourceId` values inside `tiles.tiledata`. Without an
+index it scans the whole `tiles` table, which is fine on small databases but can
+be slow on large ones.
+
+Example measurements, each looking up three merge resources referenced by about
+40 tiles:
+
+| Database | Without the index (sequential scan) | With the index | Index build time / size |
+|---|---:|---:|---:|
+| ~6.4 million tiles (3.2 GB, PostgreSQL 14) | 2.6 – 3.3 s | 7 – 8 ms (202 ms first, uncached run) | 10 s / 56 MB |
+| ~139 million tiles (78 GB, PostgreSQL 16) | 9 min 0 s – 9 min 19 s | 157 – 192 ms | 22 min / 1.4 GB |
+
+On a few million tiles the index is optional. On a large database it turns a
+lookup that runs before every preview and merge from minutes into milliseconds.
+
+To speed it up, an administrator can create this expression index. The extension
+does not create it:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS arches_merge_incoming_resource_ids_gin
+ON public.tiles USING gin (jsonb_path_query_array(tiledata, '$.*.resourceId'));
+```
+
+`CONCURRENTLY` keeps the table writable during the build, but the statement
+cannot run inside a transaction and can take a long time on large tables.
+Schedule it, check free disk space first, and confirm afterwards that the index is
+valid (`pg_index.indisvalid`). If a build fails, drop the invalid index and retry.
+To remove it:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS public.arches_merge_incoming_resource_ids_gin;
+```
 
 ## Build Frontend Assets
 

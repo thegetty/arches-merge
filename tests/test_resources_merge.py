@@ -39,6 +39,12 @@ class Query(list):
         return bool(self)
 
 
+# Arches 7.6 datatypes whose collects_multiple_values() returns True.
+LIST_DATATYPES = {"concept-list", "domain-value-list", "file-list", "resource-instance-list"}
+LIST_DATATYPE_FACTORY = SimpleNamespace(get_instance=lambda datatype: SimpleNamespace(
+    collects_multiple_values=lambda: datatype in LIST_DATATYPES))
+
+
 class TimestampSnapshotTests(unittest.TestCase):
     def test_snapshot_keeps_datetime_precision_and_standard_json_shape(self):
         ns = load_merge_methods()
@@ -77,6 +83,7 @@ class ResourcesMergeTests(unittest.TestCase):
         self.ns = load_merge_methods()
         self.merge = self.ns["Resourcesmerge"].__new__(self.ns["Resourcesmerge"])
         self.merge.get_node = lambda key: SimpleNamespace(datatype="concept-list")
+        self.merge.datatype_factory = LIST_DATATYPE_FACTORY
         self.merge._tile_save = Mock()
         self.merge._tile_delete = Mock()
         self.merge._resource_x_resource_save = Mock()
@@ -294,6 +301,7 @@ class UriMergeTests(unittest.TestCase):
         self.ns = load_merge_methods()
         self.merge = self.ns["Resourcesmerge"].__new__(self.ns["Resourcesmerge"])
         self.merge.nodegroups = {}
+        self.merge.datatype_factory = LIST_DATATYPE_FACTORY
         self.merge._uri_tile_replacements = {}
         self.merge.loadid = "test-load"
         self.tiles = {}
@@ -638,6 +646,8 @@ class IndexLifecycleTests(unittest.TestCase):
         self.merge.loadid = "test-load"
         self.merge.user = SimpleNamespace(username="tester")
         self.merge.datatype_factory = Mock()
+        self.merge.datatype_factory.get_instance.side_effect = lambda datatype: Mock(
+            collects_multiple_values=Mock(return_value=datatype in LIST_DATATYPES))
         self.calls = []
         self.resources = {}
         self.deleter = Mock()
